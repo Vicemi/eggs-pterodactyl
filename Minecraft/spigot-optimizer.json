@@ -1,0 +1,64 @@
+{
+    "_comment": "Spigot (getbukkit scraper) - CUALQUIER VERSIÓN - funcional",
+    "meta": {
+        "version": "PTDL_v2",
+        "update_url": null
+    },
+    "exported_at": "2026-04-29T00:10:00-03:00",
+    "name": "Spigot (Yolk Scraper)",
+    "author": "vicemi@vicemi.dev",
+    "description": "Descarga cualquier versión de Spigot desde getbukkit.org usando un Yolk personalizado que analiza la página. Escribe la versión que quieras (ej. 26.1.2, 1.21.4) o 'latest'.",
+    "features": [
+        "eula",
+        "java_version",
+        "pid_limit"
+    ],
+    "docker_images": {
+        "Java 25": "ghcr.io/zastinian/esdock:java_25",
+        "Java 24": "ghcr.io/ptero-eggs/yolks:java_24",
+        "Java 23": "ghcr.io/ptero-eggs/yolks:java_23",
+        "Java 22": "ghcr.io/ptero-eggs/yolks:java_22",
+        "Java 21": "ghcr.io/ptero-eggs/yolks:java_21",
+        "Java 17": "ghcr.io/ptero-eggs/yolks:java_17",
+        "Java 16": "ghcr.io/ptero-eggs/yolks:java_16",
+        "Java 11": "ghcr.io/ptero-eggs/yolks:java_11",
+        "Java 8": "ghcr.io/ptero-eggs/yolks:java_8"
+    },
+    "file_denylist": [],
+    "startup": "java -Xms256M -Xmx$(({{SERVER_MEMORY}} - ({{SERVER_MEMORY}}/10)))M -XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=200 -XX:+UnlockExperimentalVMOptions -XX:+DisableExplicitGC -XX:G1NewSizePercent=30 -XX:G1MaxNewSizePercent=40 -XX:G1HeapRegionSize=8M -XX:G1ReservePercent=20 -XX:G1HeapWastePercent=5 -XX:G1MixedGCCountTarget=4 -XX:InitiatingHeapOccupancyPercent=15 -XX:G1MixedGCLiveThresholdPercent=90 -XX:G1RSetUpdatingPauseTimePercent=5 -XX:SurvivorRatio=32 -XX:+PerfDisableSharedMem -XX:MaxTenuringThreshold=1 -Dusing.aikars.flags=https://mcflags.emc.gs -Daikars.new.flags=true -jar {{SERVER_JARFILE}}",
+    "config": {
+        "files": "{\r\n    \"server.properties\": {\r\n        \"parser\": \"properties\",\r\n        \"find\": {\r\n            \"server-ip\": \"0.0.0.0\",\r\n            \"server-port\": \"{{server.build.default.port}}\",\r\n            \"query.port\": \"{{server.build.default.port}}\"\r\n        }\r\n    }\r\n}",
+        "startup": "{\r\n    \"done\": \")! For help, type \"\r\n}",
+        "logs": "{}",
+        "stop": "stop"
+    },
+    "scripts": {
+        "installation": {
+            "script": "#!/bin/ash\r\n# Este script invoca el scraper del Yolk y guarda los logs\r\necho \">>> Iniciando instalación de Spigot...\"\r\n/install.sh 2>&1 | tee /mnt/server/install.log\r\nexit_code=${PIPESTATUS[0]}\r\nif [ $exit_code -ne 0 ]; then\r\n    echo \"❌ La instalación falló. Revisa /mnt/server/install.log para más detalles.\"\r\n    exit $exit_code\r\nfi\r\necho \">>> Instalación completada.\"",
+            "container": "ghcr.io/vicemi/yolks:spigot_latest",
+            "entrypoint": "/bin/ash"
+        }
+    },
+    "variables": [
+        {
+            "name": "Server Jar File",
+            "description": "Nombre del archivo JAR del servidor.",
+            "env_variable": "SERVER_JARFILE",
+            "default_value": "server.jar",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|regex:/^([\\w\\d._-]+)(\\.jar)$/",
+            "field_type": "text"
+        },
+        {
+            "name": "Spigot Version",
+            "description": "Versión a descargar. Usa 'latest' para la última o escribe la versión exacta (ej. 26.1.2, 1.21.4).",
+            "env_variable": "DL_VERSION",
+            "default_value": "latest",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|max:20",
+            "field_type": "text"
+        }
+    ]
+}
