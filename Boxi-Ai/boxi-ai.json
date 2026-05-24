@@ -1,0 +1,102 @@
+{
+    "_comment": "DO NOT EDIT: FILE GENERATED AUTOMATICALLY BY PTERODACTYL PANEL - PTERODACTYL.IO",
+    "meta": {
+        "version": "PTDL_v2",
+        "update_url": null
+    },
+    "exported_at": "2026-05-24T04:11:17-03:00",
+    "name": "Boxi AI - API",
+    "author": "chato102011@gmail.com",
+    "description": "API de IA gen\u00e9rica y compatible con OpenAI. Ejecuta modelos LLM peque\u00f1os en CPU pura sin necesidad de GPU. El sistema prompt se configura editando context.txt en el gestor de archivos. Yolk propio con Python 3.11 + llama-cpp-python (CPU) + FastAPI. start.sh descargado desde GitHub (Vicemi\/planka-egg).\r\n\r\nDise\u00f1ada por Vicemi basada en Boxi Bot AI",
+    "features": null,
+    "docker_images": {
+        "AI API ": "ghcr.io\/vicemi\/yolks:boxi-ai_latest"
+    },
+    "file_denylist": [],
+    "startup": "bash start.sh",
+    "config": {
+        "files": "{}",
+        "startup": "{\r\n    \"done\": \"Application startup complete.\"\r\n}",
+        "logs": "{}",
+        "stop": "^^C"
+    },
+    "scripts": {
+        "installation": {
+            "script": "#!\/bin\/bash\r\n# ============================================================\r\n# Instalador AI API para Pterodactyl\r\n# Imagen: ghcr.io\/vicemi\/yolks:boxi-ai_latest\r\n# ============================================================\r\n\r\nset -euo pipefail\r\n\r\nDISCORD_URL=\"${DISCORD_WEBHOOK_URL:-}\"\r\nSERVER_DIR=\"\/mnt\/server\"\r\n\r\ndisc() {\r\n    echo \">>> $1\"\r\n    if [ -n \"$DISCORD_URL\" ]; then\r\n        local MSG\r\n        MSG=$(printf '%s' \"$1\" | head -c 1900)\r\n        curl -s -m 8 -X POST \"$DISCORD_URL\" \\\r\n            -H \"Content-Type: application\/json\" \\\r\n            -d \"{\\\"content\\\": \\\"\\`\\`\\`\\n${MSG}\\n\\`\\`\\`\\\"}\" >\/dev\/null 2>&1 || true\r\n    fi\r\n}\r\n\r\ndisc \"=== INICIO INSTALACION AI API ===\"\r\ndisc \"Python: $(python3 --version 2>\/dev\/null || echo 'no detectado')\"\r\n\r\n# --- PASO 1: Crear estructura de directorios ---\r\ndisc \"[1\/2] Creando estructura de directorios...\"\r\nmkdir -p \"$SERVER_DIR\"\/{model_cache,logs}\r\n\r\n# Crear context.txt por defecto si no existe\r\nif [ ! -f \"$SERVER_DIR\/context.txt\" ]; then\r\n    cat > \"$SERVER_DIR\/context.txt\" << 'CTX'\r\nEres un asistente de IA util, honesto y amigable.\r\nResponde siempre en el idioma en que te habla el usuario.\r\nSe conciso, claro y preciso en tus respuestas.\r\nCTX\r\n    disc \"[1\/2] context.txt creado con valores por defecto\"\r\nelse\r\n    disc \"[1\/2] context.txt existente conservado\"\r\nfi\r\n\r\ndisc \"[1\/2] Directorios creados: $(ls $SERVER_DIR\/ | tr '\\n' ' ')\"\r\n\r\n# --- PASO 2: Descargar start.sh desde GitHub ---\r\ndisc \"[2\/2] Descargando start.sh desde Vicemi\/planka-egg...\"\r\n\r\ncurl -L -f --connect-timeout 20 --max-time 60 \\\r\n    -o \"$SERVER_DIR\/start.sh\" \\\r\n    \"https:\/\/raw.githubusercontent.com\/Vicemi\/eggs-pterodactyl\/main\/Boxi-AI\/start.sh\" \\\r\n    || { disc \"FALLO: No se pudo descargar start.sh\"; exit 1; }\r\n\r\n[ -s \"$SERVER_DIR\/start.sh\" ] || { disc \"FALLO: start.sh vac\u00edo\"; exit 1; }\r\n\r\nsed -i 's\/\\r$\/\/' \"$SERVER_DIR\/start.sh\"\r\nchmod +x \"$SERVER_DIR\/start.sh\"\r\ndisc \"[2\/2] start.sh OK \u2014 $(wc -c < $SERVER_DIR\/start.sh) bytes\"\r\n\r\ndisc \"=== INSTALACION COMPLETADA ===\"\r\ndisc \"IMPORTANTE: El modelo se descarga en el PRIMER INICIO del servidor.\"\r\ndisc \"Edita context.txt en el gestor de archivos para personalizar la IA.\"\r\necho \"Instalaci\u00f3n completada exitosamente.\"",
+            "container": "ghcr.io\/vicemi\/yolks:boxi-ai_latest",
+            "entrypoint": "bash"
+        }
+    },
+    "variables": [
+        {
+            "name": "Modelo de IA",
+            "description": "Modelo a utilizar. Opciones disponibles:\n  qwen2.5-uncensored  \u2192 Qwen2.5 0.5B sin censura (0.5B, ~400MB, transformers)\n  qwen3.5-0.8b        \u2192 Qwen3.5 0.8B GGUF Q4 (0.8B, ~500MB, r\u00e1pido en CPU)\n  llama3.2-1b         \u2192 Llama 3.2 1B Instruct GGUF Q4 (1B, ~700MB, s\u00f3lido)\n  smollm2-1.7b        \u2192 SmolLM2 1.7B Instruct GGUF Q4 (1.7B, ~1GB, muy eficiente)\n  qwen2.5-1.5b        \u2192 Qwen2.5 1.5B Instruct GGUF Q4 (1.5B, ~900MB, m\u00e1s capaz)\n\nEl modelo se descarga autom\u00e1ticamente al iniciar si no est\u00e1 en cach\u00e9.",
+            "env_variable": "MODEL_NAME",
+            "default_value": "qwen2.5-uncensored",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|in:qwen2.5-uncensored,qwen3.5-0.8b,llama3.2-1b,smollm2-1.7b,qwen2.5-1.5b",
+            "field_type": "text"
+        },
+        {
+            "name": "Token de API (Bearer)",
+            "description": "Token de autenticaci\u00f3n para la API. Incl\u00fayelo en las peticiones: Authorization: Bearer TU_TOKEN\nC\u00e1mbialo por algo seguro \u2014 cualquiera que lo tenga puede usar tu API.",
+            "env_variable": "API_TOKEN",
+            "default_value": "changeme-api-token",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|min:8",
+            "field_type": "text"
+        },
+        {
+            "name": "Tokens m\u00e1ximos de respuesta",
+            "description": "N\u00famero m\u00e1ximo de tokens que genera la IA por respuesta. M\u00e1s tokens = respuestas m\u00e1s largas pero m\u00e1s lentas en CPU. Recomendado: 256-1024.",
+            "env_variable": "MAX_TOKENS",
+            "default_value": "512",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|integer|min:64|max:4096",
+            "field_type": "text"
+        },
+        {
+            "name": "Hilos de CPU",
+            "description": "N\u00famero de hilos CPU para inferencia. M\u00e1s hilos = m\u00e1s r\u00e1pido (hasta cierto punto). No excedas los vCPU asignados al servidor. Recomendado: 2-4.",
+            "env_variable": "N_THREADS",
+            "default_value": "2",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|integer|min:1|max:32",
+            "field_type": "text"
+        },
+        {
+            "name": "Ventana de contexto (tokens)",
+            "description": "Tama\u00f1o m\u00e1ximo del contexto en tokens (solo aplica a modelos GGUF). Define cu\u00e1nto historial de conversaci\u00f3n puede procesar la IA a la vez. M\u00e1s contexto = m\u00e1s RAM. Recomendado: 2048-4096.",
+            "env_variable": "N_CTX",
+            "default_value": "4096",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|integer|min:512|max:32768",
+            "field_type": "text"
+        },
+        {
+            "name": "HuggingFace Token (opcional)",
+            "description": "Token de acceso de HuggingFace. Necesario para descargar modelos privados o con acuerdo de licencia (gated models). D\u00e9jalo vac\u00edo para modelos p\u00fablicos.",
+            "env_variable": "HF_TOKEN",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string",
+            "field_type": "text"
+        },
+        {
+            "name": "Discord Webhook URL (logs de instalaci\u00f3n)",
+            "description": "URL del webhook de Discord para recibir logs del instalador. Opcional.",
+            "env_variable": "DISCORD_WEBHOOK_URL",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "nullable|string",
+            "field_type": "text"
+        }
+    ]
+}
