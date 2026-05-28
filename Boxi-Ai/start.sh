@@ -1,12 +1,13 @@
 #!/bin/bash
 # ===========================================================
 # Boxi-AI — Script de inicio para Pterodactyl
-# Yolk      : ghcr.io/vicemi/yolks:ai-api_latest
+# Yolk      : ghcr.io/vicemi/yolks:boxi-ai_latest
 # Python    : 3.11 | llama-cpp-python (CPU) | FastAPI
 # Repositorio: https://github.com/Vicemi/eggs-pterodactyl
 # ===========================================================
 
-set -euo pipefail
+# FIX: sin -e — evita crash loop si la descarga del modelo falla
+set -uo pipefail
 
 cd /home/container || { echo "ERROR: No se pudo acceder a /home/container"; exit 1; }
 
@@ -50,7 +51,10 @@ echo ""
 echo -e "${BOLD}[0/4] Configuración${NC}"
 sep
 
+# FIX: limpiar CRLF de variables de entorno (pueden llegar con \r desde el panel)
 MODEL_NAME="${MODEL_NAME:-qwen2.5-uncensored}"
+MODEL_NAME="${MODEL_NAME//[$'\r\n']}"
+
 API_TOKEN="${API_TOKEN:-changeme}"
 API_PORT="${SERVER_PORT:-5832}"
 MAX_TOKENS="${MAX_TOKENS:-512}"
@@ -154,7 +158,7 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PASO 3: Descargar modelo
+# PASO 3: Descargar modelo (con retry infinito — no crashea el servidor)
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${BOLD}[3/4] Modelo en caché${NC}"
@@ -167,39 +171,89 @@ if [ -n "$HF_TOKEN" ]; then
     huggingface-cli login --token "$HF_TOKEN" --add-to-git-credential >/dev/null 2>&1 \
         && ok "HuggingFace autenticado" \
         || warn "No se pudo autenticar en HuggingFace (continuando sin token)"
-    HF_EXTRA="--token $HF_TOKEN"
-else
-    HF_EXTRA=""
 fi
+
+_DL_ATTEMPT=0
+_DL_OK=0
 
 if [ "$M_TYPE" = "gguf" ]; then
     GGUF_PATH="$MODEL_CACHE/$M_FILE"
-    if [ -f "$GGUF_PATH" ] && [ -s "$GGUF_PATH" ]; then
+
+    # FIX: validar caché con tamaño mínimo (50MB) — descarga parcial no cuenta como válida
+    _CACHED_SIZE=$(stat -c%s "$GGUF_PATH" 2>/dev/null || echo 0)
+    if [ -f "$GGUF_PATH" ] && [ "$_CACHED_SIZE" -gt 52428800 ]; then
         ok "En caché: ${M_FILE} ($(du -sh "$GGUF_PATH" | cut -f1))"
+        _DL_OK=1
     else
-        info "Descargando ${M_REPO} / ${M_FILE}"
-        info "Esto puede tardar varios minutos..."
-        huggingface-cli download "$M_REPO" "$M_FILE" \
-            --local-dir "$MODEL_CACHE" \
-            --local-dir-use-symlinks False \
-            $HF_EXTRA \
-            || die "Fallo al descargar '${M_REPO}/${M_FILE}'"
-        [ -f "$GGUF_PATH" ] || die "Archivo no encontrado tras descarga: ${GGUF_PATH}"
+        if [ -f "$GGUF_PATH" ]; then
+            warn "Archivo incompleto detectado ($(du -sh "$GGUF_PATH" | cut -f1)) — eliminando y re-descargando"
+            rm -f "$GGUF_PATH"
+        fi
+
+        # FIX: retry infinito con backoff exponencial — el servidor nunca crashea por descarga fallida
+        while [ "$_DL_OK" -eq 0 ]; do
+            _DL_ATTEMPT=$((_DL_ATTEMPT + 1))
+            info "Descargando ${M_REPO} / ${M_FILE} (intento ${_DL_ATTEMPT})..."
+            info "Esto puede tardar varios minutos la primera vez..."
+
+            if [ -n "$HF_TOKEN" ]; then
+                huggingface-cli download "$M_REPO" "$M_FILE" \
+                    --local-dir "$MODEL_CACHE" \
+                    --local-dir-use-symlinks False \
+                    --token "$HF_TOKEN" && _DL_OK=1 || true
+            else
+                huggingface-cli download "$M_REPO" "$M_FILE" \
+                    --local-dir "$MODEL_CACHE" \
+                    --local-dir-use-symlinks False && _DL_OK=1 || true
+            fi
+
+            if [ "$_DL_OK" -eq 0 ]; then
+                _WAIT=$(( _DL_ATTEMPT < 6 ? _DL_ATTEMPT * 60 : 300 ))
+                warn "Intento ${_DL_ATTEMPT} fallido. Reintentando en ${_WAIT}s..."
+                warn "Verifica: acceso a internet, quota de HuggingFace, nombre del modelo."
+                sleep "$_WAIT"
+            fi
+        done
+
         ok "Descargado: $(du -sh "$GGUF_PATH" | cut -f1)"
     fi
 
 elif [ "$M_TYPE" = "transformers" ]; then
     TF_DIR="$MODEL_CACHE/$MODEL_NAME"
-    if [ -d "$TF_DIR" ] && [ -n "$(ls -A "$TF_DIR" 2>/dev/null)" ]; then
+
+    # FIX: validar que config.json existe — indica modelo completo (no solo archivos parciales)
+    if [ -f "${TF_DIR}/config.json" ]; then
         ok "En caché: ${TF_DIR} ($(du -sh "$TF_DIR" | cut -f1))"
+        _DL_OK=1
     else
-        info "Descargando modelo completo: ${M_REPO}"
-        info "Esto puede tardar varios minutos..."
-        huggingface-cli download "$M_REPO" \
-            --local-dir "$TF_DIR" \
-            --local-dir-use-symlinks False \
-            $HF_EXTRA \
-            || die "Fallo al descargar '${M_REPO}'"
+        if [ -d "$TF_DIR" ]; then
+            warn "Directorio incompleto detectado — re-descargando"
+        fi
+
+        while [ "$_DL_OK" -eq 0 ]; do
+            _DL_ATTEMPT=$((_DL_ATTEMPT + 1))
+            info "Descargando modelo completo: ${M_REPO} (intento ${_DL_ATTEMPT})..."
+            info "Esto puede tardar varios minutos la primera vez..."
+
+            if [ -n "$HF_TOKEN" ]; then
+                huggingface-cli download "$M_REPO" \
+                    --local-dir "$TF_DIR" \
+                    --local-dir-use-symlinks False \
+                    --token "$HF_TOKEN" && _DL_OK=1 || true
+            else
+                huggingface-cli download "$M_REPO" \
+                    --local-dir "$TF_DIR" \
+                    --local-dir-use-symlinks False && _DL_OK=1 || true
+            fi
+
+            if [ "$_DL_OK" -eq 0 ]; then
+                _WAIT=$(( _DL_ATTEMPT < 6 ? _DL_ATTEMPT * 60 : 300 ))
+                warn "Intento ${_DL_ATTEMPT} fallido. Reintentando en ${_WAIT}s..."
+                warn "Verifica: acceso a internet, quota de HuggingFace, nombre del modelo."
+                sleep "$_WAIT"
+            fi
+        done
+
         ok "Descargado: $(du -sh "$TF_DIR" | cut -f1)"
     fi
 fi
