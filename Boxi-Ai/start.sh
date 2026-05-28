@@ -366,12 +366,23 @@ if [ "$M_TYPE" = "gguf" ]; then
         warn "Primera compilación: llama-cpp-python sin AVX (~15-20 min)."
         warn "Esto solo ocurre UNA VEZ — los siguientes inicios son instantáneos."
         mkdir -p "$_PYLIBS"
+        # FIX: redirigir tmp y cache de pip a /home/container para evitar
+        # "No space left on device" en el overlay del container (solo ~100-300MB).
+        # La compilación + headers C++ usa 500MB-1GB de espacio temporal.
+        _PIP_TMP="/home/container/.pip_tmp"
+        _PIP_CACHE="/home/container/.pip_cache"
+        mkdir -p "$_PIP_TMP" "$_PIP_CACHE"
+        export TMPDIR="$_PIP_TMP"
         export CMAKE_ARGS="-DGGML_NATIVE=OFF -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_F16C=OFF -DGGML_FMA=OFF"
         if pip3 install --break-system-packages \
             --target "$_PYLIBS" \
+            --cache-dir "$_PIP_CACHE" \
+            --no-build-isolation \
             "llama-cpp-python" --no-binary llama-cpp-python; then
             touch "$_LLAMA_FLAG"
             ok "llama-cpp-python compilado y guardado en $_PYLIBS"
+            # Liberar caché temporal post-compilación (~500MB)
+            rm -rf "$_PIP_TMP" "$_PIP_CACHE"
         else
             die "Falló la compilación de llama-cpp-python. Reinicia para reintentar."
         fi
