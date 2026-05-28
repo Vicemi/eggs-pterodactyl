@@ -13,7 +13,7 @@
         "AI API ": "ghcr.io\/vicemi\/yolks:boxi-ai_latest"
     },
     "file_denylist": [],
-    "startup": "bash /app/entrypoint.sh",
+    "startup": "bash start.sh",
     "config": {
         "files": "{}",
         "startup": "{\r\n    \"done\": \"Application startup complete.\"\r\n}",
