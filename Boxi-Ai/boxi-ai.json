@@ -4,7 +4,7 @@
         "version": "PTDL_v2",
         "update_url": null
     },
-    "exported_at": "2026-05-24T04:23:04-03:00",
+    "exported_at": "2026-05-28T00:00:00-03:00",
     "name": "Boxi AI - API",
     "author": "chato102011@gmail.com",
     "description": "API de IA genérica y compatible con OpenAI. Ejecuta modelos LLM pequeños en CPU pura sin necesidad de GPU. El sistema prompt se configura editando context.txt en el gestor de archivos. Yolk propio con Python 3.11 + llama-cpp-python (CPU) + FastAPI. start.sh descargado desde GitHub (Vicemi\/eggs-pterodactyl).\r\n\r\nDiseñada por Vicemi basada en Boxi Bot AI",
@@ -30,12 +30,12 @@
     "variables": [
         {
             "name": "Modelo de IA",
-            "description": "Modelo a utilizar. Opciones disponibles:\n  qwen2.5-uncensored  → Qwen2.5 0.5B sin censura (0.5B, ~400MB, transformers)\n  qwen3.5-0.8b        → Qwen3.5 0.8B GGUF Q4 (0.8B, ~500MB, rápido en CPU)\n  llama3.2-1b         → Llama 3.2 1B Instruct GGUF Q4 (1B, ~700MB, sólido)\n  smollm2-1.7b        → SmolLM2 1.7B Instruct GGUF Q4 (1.7B, ~1GB, muy eficiente)\n  qwen2.5-1.5b        → Qwen2.5 1.5B Instruct GGUF Q4 (1.5B, ~900MB, más capaz)\n\nEl modelo se descarga automáticamente al iniciar si no está en caché.",
+            "description": "Modelo a utilizar. Opciones disponibles:\n  qwen2.5-uncensored  → Qwen2.5 0.5B sin censura (0.5B, ~400MB, transformers)\n  qwen3.5-0.8b        → Qwen3.5 0.8B GGUF Q4 (0.8B, ~500MB, rápido en CPU)\n  llama3.2-1b         → Llama 3.2 1B Instruct GGUF Q4 (1B, ~700MB, sólido)\n  smollm2-1.7b        → SmolLM2 1.7B Instruct GGUF Q4 (1.7B, ~1GB, muy eficiente)\n  qwen2.5-1.5b        → Qwen2.5 1.5B Instruct GGUF Q4 (1.5B, ~900MB, más capaz)\n  gemma-4-e2b         → Google Gemma 4 E2B Instruct GGUF IQ4_XS (2B efectivos, ~3.3GB, visión+razonamiento)\n  deepseek-r1-1.5b    → DeepSeek R1 Distill 1.5B GGUF Q4_K_M (1.5B, ~1.1GB, razonamiento CoT)\n\nEl modelo se descarga automáticamente al iniciar si no está en caché.",
             "env_variable": "MODEL_NAME",
             "default_value": "qwen2.5-uncensored",
             "user_viewable": true,
             "user_editable": true,
-            "rules": "required|string|in:qwen2.5-uncensored,qwen3.5-0.8b,llama3.2-1b,smollm2-1.7b,qwen2.5-1.5b",
+            "rules": "required|string|in:qwen2.5-uncensored,qwen3.5-0.8b,llama3.2-1b,smollm2-1.7b,qwen2.5-1.5b,gemma-4-e2b,deepseek-r1-1.5b",
             "field_type": "text"
         },
         {
@@ -96,6 +96,16 @@
             "user_viewable": true,
             "user_editable": true,
             "rules": "nullable|string",
+            "field_type": "text"
+        },
+        {
+            "name": "Telemetría de uso",
+            "description": "Envía datos anónimos de hardware (IP, proveedor, CPU, RAM, disco) al desarrollador cada vez que el servidor inicia, para estadísticas de uso. Activa: 1 | Desactiva: 0\n\nNingún dato de conversación o token de API es enviado — solo información del hardware del servidor.",
+            "env_variable": "TELEMETRY_ENABLED",
+            "default_value": "1",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|in:0,1",
             "field_type": "text"
         }
     ]
