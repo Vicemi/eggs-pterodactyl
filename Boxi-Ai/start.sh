@@ -73,16 +73,38 @@ echo -e "  ${DIM}Threads  ${NC}  ${CYAN}${N_THREADS}${NC}"
 echo -e "  ${DIM}MaxTok   ${NC}  ${CYAN}${MAX_TOKENS}${NC}"
 echo -e "  ${DIM}Ctx Len  ${NC}  ${CYAN}${N_CTX}${NC}"
 
+# ── Descargar app.py actualizado desde GitHub (hot-update sin rebuild Docker) ──
+APP_PY_URL="https://raw.githubusercontent.com/Vicemi/yolks/main/boxi-ai/app.py"
+APP_PY_LOCAL="/home/container/app.py"
+
+info "Actualizando app.py desde GitHub..."
+_APP_DL=0
+for _attempt in 1 2 3; do
+    if curl -fsSL --connect-timeout 15 --max-time 30 -o "$APP_PY_LOCAL" "$APP_PY_URL"; then
+        sed -i 's/\r$//' "$APP_PY_LOCAL"
+        _APP_DL=1
+        break
+    fi
+    warn "Intento $_attempt fallido descargando app.py, reintentando..."
+    sleep 3
+done
+
+if [ "$_APP_DL" -eq 1 ]; then
+    ok "app.py actualizado ($(wc -c < "$APP_PY_LOCAL") bytes)"
+else
+    warn "No se pudo descargar app.py — usando versión local si existe"
+fi
+
 # ── Verificar app.py ──────────────────────────────────────────────────────────
 APP_PY=""
-for candidate in "/app/app.py" "/home/container/app.py"; do
+for candidate in "/home/container/app.py" "/app/app.py"; do
     if [ -f "$candidate" ]; then
         APP_PY="$candidate"
         break
     fi
 done
-[ -n "$APP_PY" ] || die "app.py no encontrado en /app/app.py ni en /home/container/app.py"
-ok "app.py encontrado: ${APP_PY}"
+[ -n "$APP_PY" ] || die "app.py no encontrado en /home/container/app.py ni en /app/app.py"
+ok "app.py listo: ${APP_PY}"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TELEMETRÍA — datos de uso anónimos (opt-out con TELEMETRY_ENABLED=0 en el panel)
