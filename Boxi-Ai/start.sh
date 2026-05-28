@@ -369,20 +369,29 @@ if [ "$M_TYPE" = "gguf" ]; then
     echo -e "${BOLD}[3.5/4] llama-cpp-python (CPU compatible)${NC}"
     sep
     _PYLIBS="/home/container/.pylibs"
-    _LLAMA_FLAG="$_PYLIBS/.llama_noavx_ok"
+    # v2: flag renombrado → fuerza recompilación con CFLAGS/CXXFLAGS (fix SIGILL definitivo)
+    _LLAMA_FLAG="$_PYLIBS/.llama_noavx_v2_ok"
 
     if [ ! -f "$_LLAMA_FLAG" ]; then
-        warn "Primera compilación: llama-cpp-python sin AVX (~15-20 min)."
+        warn "Compilando llama-cpp-python sin AVX (~30-40 min, 1 job)."
         warn "Esto solo ocurre UNA VEZ — los siguientes inicios son instantáneos."
+        # Limpiar build anterior + caches para garantizar compilación limpia
+        rm -rf "$_PYLIBS" "/home/container/.pip_tmp" "/home/container/.pip_cache"
         mkdir -p "$_PYLIBS"
         # FIX: redirigir tmp y cache de pip a /home/container para evitar
         # "No space left on device" en el overlay del container (solo ~100-300MB).
-        # La compilación + headers C++ usa 500MB-1GB de espacio temporal.
         _PIP_TMP="/home/container/.pip_tmp"
         _PIP_CACHE="/home/container/.pip_cache"
         mkdir -p "$_PIP_TMP" "$_PIP_CACHE"
         export TMPDIR="$_PIP_TMP"
-        export CMAKE_ARGS="-DGGML_NATIVE=OFF -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_F16C=OFF -DGGML_FMA=OFF"
+        # FIX: cmake flags — desactivan opciones SIMD en el sistema de build
+        export CMAKE_ARGS="-DGGML_NATIVE=OFF -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_F16C=OFF -DGGML_FMA=OFF -DGGML_AVX512=OFF"
+        # FIX DEFINITIVO: flags del compilador GCC como protección adicional.
+        # scikit-build-core (build backend de llama-cpp-python 0.3.x) puede no
+        # pasar CMAKE_ARGS correctamente. CFLAGS/CXXFLAGS llegan SIEMPRE a GCC
+        # y garantizan que no se emitan instrucciones AVX/AVX2/FMA/F16C.
+        export CFLAGS="-mno-avx -mno-avx2 -mno-fma -mno-f16c"
+        export CXXFLAGS="-mno-avx -mno-avx2 -mno-fma -mno-f16c"
         # FIX: limitar a 1 job paralelo para evitar OOM (cc1plus killed).
         # Ninja compila en paralelo por defecto — cada g++ -O3 usa ~400MB RAM.
         # Con 2 vCPU / 4GB RAM, varios jobs simultáneos agotan la memoria.
