@@ -377,7 +377,6 @@ if [ "$M_TYPE" = "gguf" ]; then
         if pip3 install --break-system-packages \
             --target "$_PYLIBS" \
             --cache-dir "$_PIP_CACHE" \
-            --no-build-isolation \
             "llama-cpp-python" --no-binary llama-cpp-python; then
             touch "$_LLAMA_FLAG"
             ok "llama-cpp-python compilado y guardado en $_PYLIBS"
