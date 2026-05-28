@@ -348,6 +348,40 @@ elif [ "$M_TYPE" = "transformers" ]; then
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
+# PASO 3.5: llama-cpp-python sin AVX (solo modelos GGUF)
+# ─────────────────────────────────────────────────────────────────────────────
+# Los wheels pre-compilados de llama-cpp-python usan AVX2, que muchos VPS no
+# exponen (causa SIGILL / exit 132). Este paso compila una versión sin AVX y
+# la guarda en /home/container/.pylibs (volumen persistente).
+# Solo ocurre UNA VEZ — los reinicios posteriores usan el build cacheado.
+# ─────────────────────────────────────────────────────────────────────────────
+if [ "$M_TYPE" = "gguf" ]; then
+    echo ""
+    echo -e "${BOLD}[3.5/4] llama-cpp-python (CPU compatible)${NC}"
+    sep
+    _PYLIBS="/home/container/.pylibs"
+    _LLAMA_FLAG="$_PYLIBS/.llama_noavx_ok"
+
+    if [ ! -f "$_LLAMA_FLAG" ]; then
+        warn "Primera compilación: llama-cpp-python sin AVX (~15-20 min)."
+        warn "Esto solo ocurre UNA VEZ — los siguientes inicios son instantáneos."
+        mkdir -p "$_PYLIBS"
+        export CMAKE_ARGS="-DGGML_NATIVE=OFF -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_F16C=OFF -DGGML_FMA=OFF"
+        if pip3 install --break-system-packages \
+            --target "$_PYLIBS" \
+            "llama-cpp-python" --no-binary llama-cpp-python; then
+            touch "$_LLAMA_FLAG"
+            ok "llama-cpp-python compilado y guardado en $_PYLIBS"
+        else
+            die "Falló la compilación de llama-cpp-python. Reinicia para reintentar."
+        fi
+    else
+        ok "llama-cpp-python sin AVX: usando build cacheado"
+    fi
+    export PYTHONPATH="$_PYLIBS:${PYTHONPATH:-}"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
 # PASO 4: Iniciar API
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
