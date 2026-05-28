@@ -166,11 +166,27 @@ sep
 
 mkdir -p "$MODEL_CACHE"
 
+# FIX: detectar comando HuggingFace disponible (hf en versiones nuevas, huggingface-cli en antiguas)
+if command -v hf &>/dev/null; then
+    HF_CMD="hf"
+elif command -v huggingface-cli &>/dev/null; then
+    HF_CMD="huggingface-cli"
+else
+    die "Comando HuggingFace no encontrado (ni 'hf' ni 'huggingface-cli'). Verifica el yolk."
+fi
+ok "Comando HuggingFace: ${HF_CMD}"
+
 if [ -n "$HF_TOKEN" ]; then
     info "Autenticando en HuggingFace..."
-    huggingface-cli login --token "$HF_TOKEN" --add-to-git-credential >/dev/null 2>&1 \
-        && ok "HuggingFace autenticado" \
-        || warn "No se pudo autenticar en HuggingFace (continuando sin token)"
+    if [ "$HF_CMD" = "hf" ]; then
+        hf auth login --token "$HF_TOKEN" --add-to-git-credential >/dev/null 2>&1 \
+            && ok "HuggingFace autenticado" \
+            || warn "No se pudo autenticar en HuggingFace (continuando sin token)"
+    else
+        huggingface-cli login --token "$HF_TOKEN" --add-to-git-credential >/dev/null 2>&1 \
+            && ok "HuggingFace autenticado" \
+            || warn "No se pudo autenticar en HuggingFace (continuando sin token)"
+    fi
 fi
 
 _DL_ATTEMPT=0
@@ -197,14 +213,14 @@ if [ "$M_TYPE" = "gguf" ]; then
             info "Esto puede tardar varios minutos la primera vez..."
 
             if [ -n "$HF_TOKEN" ]; then
-                huggingface-cli download "$M_REPO" "$M_FILE" \
+                "$HF_CMD" download "$M_REPO" "$M_FILE" \
                     --local-dir "$MODEL_CACHE" \
                     --local-dir-use-symlinks False \
-                    --token "$HF_TOKEN" && _DL_OK=1 || true
+                    --token "$HF_TOKEN" 2>&1 | grep -v "^Warning:\|^Hint:" && _DL_OK=1 || true
             else
-                huggingface-cli download "$M_REPO" "$M_FILE" \
+                "$HF_CMD" download "$M_REPO" "$M_FILE" \
                     --local-dir "$MODEL_CACHE" \
-                    --local-dir-use-symlinks False && _DL_OK=1 || true
+                    --local-dir-use-symlinks False 2>&1 | grep -v "^Warning:\|^Hint:" && _DL_OK=1 || true
             fi
 
             if [ "$_DL_OK" -eq 0 ]; then
@@ -236,14 +252,14 @@ elif [ "$M_TYPE" = "transformers" ]; then
             info "Esto puede tardar varios minutos la primera vez..."
 
             if [ -n "$HF_TOKEN" ]; then
-                huggingface-cli download "$M_REPO" \
+                "$HF_CMD" download "$M_REPO" \
                     --local-dir "$TF_DIR" \
                     --local-dir-use-symlinks False \
-                    --token "$HF_TOKEN" && _DL_OK=1 || true
+                    --token "$HF_TOKEN" 2>&1 | grep -v "^Warning:\|^Hint:" && _DL_OK=1 || true
             else
-                huggingface-cli download "$M_REPO" \
+                "$HF_CMD" download "$M_REPO" \
                     --local-dir "$TF_DIR" \
-                    --local-dir-use-symlinks False && _DL_OK=1 || true
+                    --local-dir-use-symlinks False 2>&1 | grep -v "^Warning:\|^Hint:" && _DL_OK=1 || true
             fi
 
             if [ "$_DL_OK" -eq 0 ]; then
