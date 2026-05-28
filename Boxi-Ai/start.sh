@@ -11,6 +11,15 @@ set -uo pipefail
 
 cd /home/container || { echo "ERROR: No se pudo acceder a /home/container"; exit 1; }
 
+# ── Log a archivo ─────────────────────────────────────────────────────────────
+# Todo el output (stdout + stderr) se escribe en consola Y en logs/startup_*.log
+# para poder revisar errores incluso si el servidor crashea antes de terminar.
+mkdir -p /home/container/logs
+# Mantener solo los últimos 5 logs (evitar llenar disco)
+ls -t /home/container/logs/startup_*.log 2>/dev/null | tail -n +6 | xargs rm -f 2>/dev/null || true
+LOG_FILE="/home/container/logs/startup_$(date +%Y%m%d_%H%M%S).log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+
 # ── Colores ───────────────────────────────────────────────────────────────────
 RED='\033[0;31m'
 GREEN='\033[0;32m'
