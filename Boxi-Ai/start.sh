@@ -160,8 +160,8 @@ MFILE["qwen2.5-1.5b"]="Qwen2.5-1.5B-Instruct-Q4_K_M.gguf"
 MLABEL["qwen2.5-1.5b"]="Qwen2.5 1.5B Instruct (GGUF Q4_K_M)"
 
 MTYPE["gemma-4-e2b"]="gguf"
-MREPO["gemma-4-e2b"]="bartowski/google_gemma-4-e2b-it-GGUF"
-MFILE["gemma-4-e2b"]="gemma-4-E2B-it-IQ4_XS.gguf"
+MREPO["gemma-4-e2b"]="bartowski/google_gemma-4-E2B-it-GGUF"
+MFILE["gemma-4-e2b"]="google_gemma-4-E2B-it-IQ4_XS.gguf"
 MLABEL["gemma-4-e2b"]="Gemma 4 E2B Instruct (GGUF IQ4_XS)"
 
 MTYPE["deepseek-r1-1.5b"]="gguf"
