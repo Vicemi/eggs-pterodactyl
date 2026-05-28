@@ -383,6 +383,11 @@ if [ "$M_TYPE" = "gguf" ]; then
         mkdir -p "$_PIP_TMP" "$_PIP_CACHE"
         export TMPDIR="$_PIP_TMP"
         export CMAKE_ARGS="-DGGML_NATIVE=OFF -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_F16C=OFF -DGGML_FMA=OFF"
+        # FIX: limitar a 1 job paralelo para evitar OOM (cc1plus killed).
+        # Ninja compila en paralelo por defecto — cada g++ -O3 usa ~400MB RAM.
+        # Con 2 vCPU / 4GB RAM, varios jobs simultáneos agotan la memoria.
+        # 1 job = más lento (~30-40 min) pero no falla por falta de RAM.
+        export CMAKE_BUILD_PARALLEL_LEVEL=1
         if pip3 install --break-system-packages \
             --target "$_PYLIBS" \
             --cache-dir "$_PIP_CACHE" \
