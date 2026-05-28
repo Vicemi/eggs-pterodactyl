@@ -215,12 +215,11 @@ if [ "$M_TYPE" = "gguf" ]; then
             if [ -n "$HF_TOKEN" ]; then
                 "$HF_CMD" download "$M_REPO" "$M_FILE" \
                     --local-dir "$MODEL_CACHE" \
-                    --local-dir-use-symlinks False \
                     --token "$HF_TOKEN" 2>&1 | grep -v "^Warning:\|^Hint:" && _DL_OK=1 || true
             else
                 "$HF_CMD" download "$M_REPO" "$M_FILE" \
                     --local-dir "$MODEL_CACHE" \
-                    --local-dir-use-symlinks False 2>&1 | grep -v "^Warning:\|^Hint:" && _DL_OK=1 || true
+                    2>&1 | grep -v "^Warning:\|^Hint:" && _DL_OK=1 || true
             fi
 
             if [ "$_DL_OK" -eq 0 ]; then
@@ -254,12 +253,11 @@ elif [ "$M_TYPE" = "transformers" ]; then
             if [ -n "$HF_TOKEN" ]; then
                 "$HF_CMD" download "$M_REPO" \
                     --local-dir "$TF_DIR" \
-                    --local-dir-use-symlinks False \
                     --token "$HF_TOKEN" 2>&1 | grep -v "^Warning:\|^Hint:" && _DL_OK=1 || true
             else
                 "$HF_CMD" download "$M_REPO" \
                     --local-dir "$TF_DIR" \
-                    --local-dir-use-symlinks False 2>&1 | grep -v "^Warning:\|^Hint:" && _DL_OK=1 || true
+                    2>&1 | grep -v "^Warning:\|^Hint:" && _DL_OK=1 || true
             fi
 
             if [ "$_DL_OK" -eq 0 ]; then
