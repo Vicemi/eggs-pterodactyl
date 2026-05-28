@@ -74,7 +74,7 @@ echo -e "  ${DIM}MaxTok   ${NC}  ${CYAN}${MAX_TOKENS}${NC}"
 echo -e "  ${DIM}Ctx Len  ${NC}  ${CYAN}${N_CTX}${NC}"
 
 # ── Descargar app.py actualizado desde GitHub (hot-update sin rebuild Docker) ──
-APP_PY_URL="https://raw.githubusercontent.com/Vicemi/yolks/main/boxi-ai/app.py"
+APP_PY_URL="https://raw.githubusercontent.com/Vicemi/eggs-pterodactyl/main/Boxi-Ai/app.py"
 APP_PY_LOCAL="/home/container/app.py"
 
 info "Actualizando app.py desde GitHub..."
