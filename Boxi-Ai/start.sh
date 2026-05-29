@@ -363,47 +363,50 @@ fi
 # exponen (causa SIGILL / exit 132). Este paso compila una versión sin AVX y
 # la guarda en /home/container/.pylibs (volumen persistente).
 # Solo ocurre UNA VEZ — los reinicios posteriores usan el build cacheado.
+#
+# TRIPLE PROTECCIÓN contra instrucciones AVX en el binario compilado:
+#  1. --config-settings cmake.args=... → mecanismo oficial PEP 517 para
+#     pasar flags a cmake a través de scikit-build-core (el build backend
+#     de llama-cpp-python 0.3.x). Es el método más fiable.
+#  2. CMAKE_ARGS env → compatibilidad con versiones antiguas / setup.py.
+#  3. CFLAGS/CXXFLAGS → protección a nivel de compilador GCC. Incluso si
+#     cmake ignora las opciones GGML_AVX, GCC nunca emitirá instrucciones
+#     AVX/AVX2/FMA/F16C cuando -mno-avx etc. están en los flags.
 # ─────────────────────────────────────────────────────────────────────────────
 if [ "$M_TYPE" = "gguf" ]; then
     echo ""
     echo -e "${BOLD}[3.5/4] llama-cpp-python (CPU compatible)${NC}"
     sep
     _PYLIBS="/home/container/.pylibs"
-    # v2: flag renombrado → fuerza recompilación con CFLAGS/CXXFLAGS (fix SIGILL definitivo)
-    _LLAMA_FLAG="$_PYLIBS/.llama_noavx_v2_ok"
+    # v3: --config-settings cmake.args (fix definitivo SIGILL — PEP 517 oficial)
+    _LLAMA_FLAG="$_PYLIBS/.llama_noavx_v3_ok"
 
     if [ ! -f "$_LLAMA_FLAG" ]; then
         warn "Compilando llama-cpp-python sin AVX (~30-40 min, 1 job)."
         warn "Esto solo ocurre UNA VEZ — los siguientes inicios son instantáneos."
-        # Limpiar build anterior + caches para garantizar compilación limpia
+        # Limpiar CUALQUIER build anterior (flags incorrectos → binario AVX)
         rm -rf "$_PYLIBS" "/home/container/.pip_tmp" "/home/container/.pip_cache"
         mkdir -p "$_PYLIBS"
-        # FIX: redirigir tmp y cache de pip a /home/container para evitar
-        # "No space left on device" en el overlay del container (solo ~100-300MB).
         _PIP_TMP="/home/container/.pip_tmp"
         _PIP_CACHE="/home/container/.pip_cache"
         mkdir -p "$_PIP_TMP" "$_PIP_CACHE"
+        # TMPDIR → evita "No space left on device" en el overlay del container
         export TMPDIR="$_PIP_TMP"
-        # FIX: cmake flags — desactivan opciones SIMD en el sistema de build
+        # [2] CMAKE_ARGS — compatibilidad
         export CMAKE_ARGS="-DGGML_NATIVE=OFF -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_F16C=OFF -DGGML_FMA=OFF -DGGML_AVX512=OFF"
-        # FIX DEFINITIVO: flags del compilador GCC como protección adicional.
-        # scikit-build-core (build backend de llama-cpp-python 0.3.x) puede no
-        # pasar CMAKE_ARGS correctamente. CFLAGS/CXXFLAGS llegan SIEMPRE a GCC
-        # y garantizan que no se emitan instrucciones AVX/AVX2/FMA/F16C.
+        # [3] CFLAGS/CXXFLAGS — protección a nivel de compilador
         export CFLAGS="-mno-avx -mno-avx2 -mno-fma -mno-f16c"
         export CXXFLAGS="-mno-avx -mno-avx2 -mno-fma -mno-f16c"
-        # FIX: limitar a 1 job paralelo para evitar OOM (cc1plus killed).
-        # Ninja compila en paralelo por defecto — cada g++ -O3 usa ~400MB RAM.
-        # Con 2 vCPU / 4GB RAM, varios jobs simultáneos agotan la memoria.
-        # 1 job = más lento (~30-40 min) pero no falla por falta de RAM.
+        # 1 job paralelo → evita OOM kill de cc1plus (cada g++ -O3 usa ~400MB RAM)
         export CMAKE_BUILD_PARALLEL_LEVEL=1
+        # [1] --config-settings cmake.args — método oficial PEP 517 / scikit-build-core
         if pip3 install --break-system-packages \
             --target "$_PYLIBS" \
             --cache-dir "$_PIP_CACHE" \
+            --config-settings "cmake.args=-DGGML_NATIVE=OFF -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_F16C=OFF -DGGML_FMA=OFF -DGGML_AVX512=OFF" \
             "llama-cpp-python" --no-binary llama-cpp-python; then
             touch "$_LLAMA_FLAG"
             ok "llama-cpp-python compilado y guardado en $_PYLIBS"
-            # Liberar caché temporal post-compilación (~500MB)
             rm -rf "$_PIP_TMP" "$_PIP_CACHE"
         else
             die "Falló la compilación de llama-cpp-python. Reinicia para reintentar."
