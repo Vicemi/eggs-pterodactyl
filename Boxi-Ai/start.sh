@@ -364,51 +364,82 @@ fi
 # la guarda en /home/container/.pylibs (volumen persistente).
 # Solo ocurre UNA VEZ — los reinicios posteriores usan el build cacheado.
 #
-# TRIPLE PROTECCIÓN contra instrucciones AVX en el binario compilado:
-#  1. --config-settings cmake.args=... → mecanismo oficial PEP 517 para
-#     pasar flags a cmake a través de scikit-build-core (el build backend
-#     de llama-cpp-python 0.3.x). Es el método más fiable.
-#  2. CMAKE_ARGS env → compatibilidad con versiones antiguas / setup.py.
-#  3. CFLAGS/CXXFLAGS → protección a nivel de compilador GCC. Incluso si
-#     cmake ignora las opciones GGML_AVX, GCC nunca emitirá instrucciones
-#     AVX/AVX2/FMA/F16C cuando -mno-avx etc. están en los flags.
+# CUÁDRUPLE PROTECCIÓN contra instrucciones AVX (v4 — definitivo):
+#  1. COMPILER WRAPPERS (CC/CXX) — la única protección 100% infalible:
+#     gcc/g++ wrappers que añaden -mno-avx AL FINAL del cmd de compilación.
+#     En GCC, los flags POSTERIORES siempre ganan: si cmake añade -mavx2
+#     antes, nuestro -mno-avx2 al final lo sobrescribe invariablemente.
+#  2. CFLAGS/CXXFLAGS → flags adicionales en posición inicial.
+#  3. CMAKE_ARGS → desactiva GGML_AVX/GGML_NATIVE antes de que cmake actúe.
+#  4. --config-settings cmake.args (uno por flag) → PEP 517 para
+#     scikit-build-core. Nota: pasar todos juntos en una sola string con
+#     espacios NO funciona (llega a cmake como un único argumento).
 # ─────────────────────────────────────────────────────────────────────────────
 if [ "$M_TYPE" = "gguf" ]; then
     echo ""
     echo -e "${BOLD}[3.5/4] llama-cpp-python (CPU compatible)${NC}"
     sep
     _PYLIBS="/home/container/.pylibs"
-    # v3: --config-settings cmake.args (fix definitivo SIGILL — PEP 517 oficial)
-    _LLAMA_FLAG="$_PYLIBS/.llama_noavx_v3_ok"
+    # v4: compiler wrappers CC/CXX (fix definitivo SIGILL)
+    _LLAMA_FLAG="$_PYLIBS/.llama_noavx_v4_ok"
 
     if [ ! -f "$_LLAMA_FLAG" ]; then
         warn "Compilando llama-cpp-python sin AVX (~30-40 min, 1 job)."
         warn "Esto solo ocurre UNA VEZ — los siguientes inicios son instantáneos."
-        # Limpiar CUALQUIER build anterior (flags incorrectos → binario AVX)
-        rm -rf "$_PYLIBS" "/home/container/.pip_tmp" "/home/container/.pip_cache"
+        # Limpiar CUALQUIER build anterior (flags incorrectos → binario con AVX)
+        rm -rf "$_PYLIBS" "/home/container/.pip_tmp" "/home/container/.pip_cache" \
+               "/home/container/.compiler_wrappers"
         mkdir -p "$_PYLIBS"
         _PIP_TMP="/home/container/.pip_tmp"
         _PIP_CACHE="/home/container/.pip_cache"
-        mkdir -p "$_PIP_TMP" "$_PIP_CACHE"
+        _WRAPPERS="/home/container/.compiler_wrappers"
+        mkdir -p "$_PIP_TMP" "$_PIP_CACHE" "$_WRAPPERS"
+
         # TMPDIR → evita "No space left on device" en el overlay del container
         export TMPDIR="$_PIP_TMP"
-        # [2] CMAKE_ARGS — compatibilidad
-        export CMAKE_ARGS="-DGGML_NATIVE=OFF -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_F16C=OFF -DGGML_FMA=OFF -DGGML_AVX512=OFF"
-        # [3] CFLAGS/CXXFLAGS — protección a nivel de compilador
+
+        # [1] COMPILER WRAPPERS — añaden -mno-avx AL FINAL de cada cmd gcc/g++.
+        # Sea cual sea el flag -mavx que cmake ponga antes, nuestro -mno-avx al
+        # final siempre gana en GCC/Clang (flag posterior sobrescribe al anterior).
+        _REAL_GCC="$(command -v gcc 2>/dev/null || echo /usr/bin/gcc)"
+        _REAL_GPP="$(command -v g++ 2>/dev/null || echo /usr/bin/g++)"
+        printf '#!/bin/bash\nexec "%s" "$@" -mno-avx -mno-avx2 -mno-fma -mno-f16c\n' \
+            "$_REAL_GCC" > "$_WRAPPERS/gcc"
+        printf '#!/bin/bash\nexec "%s" "$@" -mno-avx -mno-avx2 -mno-fma -mno-f16c\n' \
+            "$_REAL_GPP" > "$_WRAPPERS/g++"
+        chmod +x "$_WRAPPERS/gcc" "$_WRAPPERS/g++"
+        # CC/CXX → cmake usa explícitamente estos compiladores
+        export CC="$_WRAPPERS/gcc"
+        export CXX="$_WRAPPERS/g++"
+
+        # [2] CFLAGS/CXXFLAGS — protección adicional en posición inicial
         export CFLAGS="-mno-avx -mno-avx2 -mno-fma -mno-f16c"
         export CXXFLAGS="-mno-avx -mno-avx2 -mno-fma -mno-f16c"
+
+        # [3] CMAKE_ARGS — desactiva explícitamente GGML_NATIVE y GGML_AVX*
+        export CMAKE_ARGS="-DGGML_NATIVE=OFF -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_F16C=OFF -DGGML_FMA=OFF -DGGML_AVX512=OFF"
+
         # 1 job paralelo → evita OOM kill de cc1plus (cada g++ -O3 usa ~400MB RAM)
         export CMAKE_BUILD_PARALLEL_LEVEL=1
-        # [1] --config-settings cmake.args — método oficial PEP 517 / scikit-build-core
+
+        # [4] --config-settings cmake.args (UNO POR LÍNEA → scikit-build-core
+        # los pasa como args separados a cmake; una sola string con espacios
+        # llega como un único argumento malformado)
         if pip3 install --break-system-packages \
             --target "$_PYLIBS" \
             --cache-dir "$_PIP_CACHE" \
-            --config-settings "cmake.args=-DGGML_NATIVE=OFF -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_F16C=OFF -DGGML_FMA=OFF -DGGML_AVX512=OFF" \
+            --config-settings "cmake.args=-DGGML_NATIVE=OFF" \
+            --config-settings "cmake.args=-DGGML_AVX=OFF" \
+            --config-settings "cmake.args=-DGGML_AVX2=OFF" \
+            --config-settings "cmake.args=-DGGML_F16C=OFF" \
+            --config-settings "cmake.args=-DGGML_FMA=OFF" \
+            --config-settings "cmake.args=-DGGML_AVX512=OFF" \
             "llama-cpp-python" --no-binary llama-cpp-python; then
             touch "$_LLAMA_FLAG"
             ok "llama-cpp-python compilado y guardado en $_PYLIBS"
-            rm -rf "$_PIP_TMP" "$_PIP_CACHE"
+            rm -rf "$_PIP_TMP" "$_PIP_CACHE" "$_WRAPPERS"
         else
+            rm -rf "$_WRAPPERS"
             die "Falló la compilación de llama-cpp-python. Reinicia para reintentar."
         fi
     else
