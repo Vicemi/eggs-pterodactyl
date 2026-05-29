@@ -437,19 +437,6 @@ if [ "$M_TYPE" = "gguf" ]; then
             --config-settings "cmake.args=-DGGML_FMA=OFF" \
             --config-settings "cmake.args=-DGGML_AVX512=OFF" \
             "llama-cpp-python" --no-binary llama-cpp-python; then
-
-            # Verificar que el binario no tenga instrucciones AVX
-            _SO=$(find "$_PYLIBS" -name "*.so" 2>/dev/null | grep -i llama | head -1)
-            if [ -n "$_SO" ] && command -v objdump &>/dev/null; then
-                _AVX=$(objdump -d "$_SO" 2>/dev/null | grep -cE "\symm[0-9]|\svxorp|\svmulp|\svaddp" || echo 0)
-                if [ "$_AVX" -gt 0 ]; then
-                    warn "ADVERTENCIA: $_AVX instrucciones AVX detectadas en el binario."
-                    warn "El modelo puede fallar con SIGILL. Verifica la CPU del VPS."
-                else
-                    ok "Verificación: binario sin instrucciones AVX detectadas"
-                fi
-            fi
-
             touch "$_LLAMA_FLAG"
             ok "llama-cpp-python compilado y guardado en $_PYLIBS"
             rm -rf "$_PIP_TMP" "$_PIP_CACHE" "$_WRAPPERS"
@@ -461,6 +448,77 @@ if [ "$M_TYPE" = "gguf" ]; then
         ok "llama-cpp-python sin AVX: usando build cacheado"
     fi
     export PYTHONPATH="$_PYLIBS:${PYTHONPATH:-}"
+
+    # ── PRE-FLIGHT + AUTO-TUNE de N_CTX ───────────────────────────────────────
+    # Carga el modelo y hace una inferencia corta ANTES de arrancar la API, para
+    # detectar crashes silenciosos ("Server offline") y traducirlos a una causa:
+    #   · señal 4  (SIGILL)  → instrucción ilegal (AVX) → aborta (no se arregla aquí)
+    #   · señal 9  (SIGKILL) → OOM, sin RAM → baja N_CTX AUTOMÁTICAMENTE y reintenta
+    #   · señal 11 (SIGSEGV) → modelo corrupto → aborta
+    # El valor de N_CTX que SÍ entra en RAM se cachea en .working_n_ctx para que
+    # los siguientes inicios sean directos. Así el servidor arranca solo, sin que
+    # tengas que editar nada en el panel.
+    _CTX_CACHE="$_PYLIBS/.working_n_ctx"
+    _GGUF_PATH="$MODEL_CACHE/$M_FILE"
+
+    if [ -f "$_CTX_CACHE" ]; then
+        _cached=$(cat "$_CTX_CACHE" 2>/dev/null || echo "")
+        if printf '%s' "$_cached" | grep -qE '^[0-9]+$' && [ "$_cached" -lt "$N_CTX" ]; then
+            warn "Auto-tune previo: N_CTX limitado a ${_cached} (la RAM no alcanza para ${N_CTX})"
+            N_CTX="$_cached"
+        fi
+    else
+        # Candidatos: el N_CTX pedido y, si crashea por OOM, valores menores
+        _CANDIDATES="$N_CTX"
+        for _c in 2048 1024 512; do
+            [ "$_c" -lt "$N_CTX" ] && _CANDIDATES="$_CANDIDATES $_c"
+        done
+
+        _CHOSEN=""
+        for _try in $_CANDIDATES; do
+            info "Pre-flight: probando carga del modelo con N_CTX=${_try}..."
+            PYTHONPATH="$_PYLIBS:${PYTHONPATH:-}" python3 - "$_GGUF_PATH" "$_try" "$N_THREADS" <<'PYEOF'
+import sys
+from llama_cpp import Llama
+path, nctx, nth = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+m = Llama(model_path=path, n_ctx=nctx, n_threads=nth, n_gpu_layers=0, verbose=False)
+o = m.create_chat_completion(messages=[{"role": "user", "content": "ping"}], max_tokens=8)
+print("PREFLIGHT_OK:", o["choices"][0]["message"]["content"][:60].replace(chr(10), " "))
+PYEOF
+            _rc=$?
+            if [ "$_rc" -eq 0 ]; then
+                _CHOSEN="$_try"
+                break
+            elif [ "$_rc" -gt 128 ]; then
+                _sig=$((_rc - 128))
+                if [ "$_sig" -eq 4 ]; then
+                    die "llama_cpp crashea con SIGILL (señal 4): INSTRUCCIÓN ILEGAL.
+  El binario usa instrucciones que esta CPU no ejecuta (AVX/AVX2). Esto NO se
+  arregla bajando N_CTX. Avísame para forzar una ISA aún más baja al compilar."
+                elif [ "$_sig" -eq 9 ]; then
+                    warn "N_CTX=${_try} se quedó SIN MEMORIA (OOM, señal 9). Probando un valor menor..."
+                    continue
+                else
+                    die "llama_cpp crashea con señal ${_sig} al cargar (N_CTX=${_try})."
+                fi
+            else
+                die "Pre-flight falló (código ${_rc}). Revisa el error de Python arriba."
+            fi
+        done
+
+        if [ -z "$_CHOSEN" ]; then
+            die "El modelo no cargó ni con N_CTX=512 — la RAM del servidor es demasiado baja.
+  Sube la RAM asignada al servidor o usa un modelo GGUF más pequeño (qwen3.5-0.8b)."
+        fi
+
+        echo "$_CHOSEN" > "$_CTX_CACHE"
+        if [ "$_CHOSEN" -lt "$N_CTX" ]; then
+            warn "Auto-tune: N_CTX reducido de ${N_CTX} a ${_CHOSEN} para que entre en la RAM disponible."
+            N_CTX="$_CHOSEN"
+        else
+            ok "Pre-flight OK — el modelo carga e infiere con N_CTX=${N_CTX}"
+        fi
+    fi
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
