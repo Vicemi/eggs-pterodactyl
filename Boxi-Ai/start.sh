@@ -550,65 +550,47 @@ PYEOF
             elif [ "$_rc" -gt 128 ]; then
                 _sig=$((_rc - 128))
                 if [ "$_sig" -eq 4 ]; then
-                    warn "SIGILL detectado — capturando la instrucción exacta (sin gdb ni root)..."
+                    warn "SIGILL detectado — diagnóstico con verbose + marcadores de etapa..."
                     echo -e "${DIM}  ── Diagnóstico SIGILL ──────────────────────────────${NC}"
-                    echo "  Librerías .so de llama_cpp:"
-                    find "$_PYLIBS/llama_cpp/lib" -name "*.so*" 2>/dev/null | while read -r _f; do
-                        echo "    $(du -h "$_f" 2>/dev/null | cut -f1)  $_f"
-                    done
-                    # Catcher Python+ctypes: instala un handler de SIGILL, lee el RIP del
-                    # ucontext, vuelca los bytes del opcode y la librería+offset. Los bytes
-                    # identifican la instrucción SIN ambigüedad (p.ej. c4 e2 79 13 = vcvtph2ps).
+                    # (A) Reproduce la carga con verbose=True y marcadores de etapa, SIN filtrar
+                    # la salida. Así vemos: (1) qué detecta ggml de la CPU (system_info),
+                    # (2) en qué ETAPA exacta muere (import / carga / inferencia), (3) cualquier
+                    # mensaje de GGML_ASSERT/abort que verbose=False ocultaba.
                     cat > /home/container/.sigill_probe.py <<'PYDIAG'
-import ctypes, os, sys
-PATH = sys.argv[1]; NCTX = int(sys.argv[2])
-libc = ctypes.CDLL("libc.so.6", use_errno=True)
-class SA(ctypes.Structure):
-    _fields_ = [("h", ctypes.c_void_p), ("mask", ctypes.c_ulong * 16),
-                ("flags", ctypes.c_int), ("restorer", ctypes.c_void_p)]
-HT = ctypes.CFUNCTYPE(None, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
-def on_ill(sig, info, uc):
-    try:
-        rip = ctypes.cast(uc + 168, ctypes.POINTER(ctypes.c_uint64))[0]
-        raw = (ctypes.c_ubyte * 16).from_address(rip)
-        hexs = " ".join("%02x" % b for b in raw)
-        lib = "?"; off = 0
-        try:
-            for ln in open("/proc/self/maps"):
-                a = ln.split(); r = a[0].split("-")
-                lo = int(r[0], 16); hi = int(r[1], 16)
-                if lo <= rip < hi:
-                    lib = a[5] if len(a) >= 6 else "?"; off = rip - lo; break
-        except Exception:
-            pass
-        os.write(2, ("\nFAULT_RIP=0x%x\nFAULT_BYTES=%s\nFAULT_LIB=%s +0x%x\n" % (rip, hexs, lib, off)).encode())
-    except Exception as e:
-        os.write(2, ("handler-err: %r\n" % (e,)).encode())
-    libc._exit(42)
-_cb = HT(on_ill)
-act = SA(); act.h = ctypes.cast(_cb, ctypes.c_void_p); act.flags = 4  # SA_SIGINFO
-libc.sigaction(4, ctypes.byref(act), None)  # 4 = SIGILL
+import sys, os, faulthandler
+faulthandler.enable()
+def mark(s): os.write(2, ("PROBE_STAGE: " + s + "\n").encode())
+mark("begin")
 from llama_cpp import Llama
-m = Llama(model_path=PATH, n_ctx=NCTX, n_threads=1, n_gpu_layers=0, verbose=False)
-m.create_chat_completion(messages=[{"role": "user", "content": "ping"}], max_tokens=8)
-print("NO_FAULT_REPRO")
+mark("imported_llama_cpp")
+m = Llama(model_path=sys.argv[1], n_ctx=int(sys.argv[2]), n_threads=1, n_gpu_layers=0, verbose=True)
+mark("model_loaded")
+o = m.create_chat_completion(messages=[{"role": "user", "content": "ping"}], max_tokens=8)
+mark("inference_done")
+print("PROBE_OK:", o["choices"][0]["message"]["content"][:40].replace(chr(10), " "))
 PYDIAG
+                    echo "  Salida COMPLETA de la carga (verbose=True, últimas 60 líneas):"
                     PYTHONPATH="$_PYLIBS:${PYTHONPATH:-}" python3 /home/container/.sigill_probe.py "$_GGUF_PATH" 256 2>&1 \
-                      | grep -E 'FAULT_RIP|FAULT_BYTES|FAULT_LIB|handler-err|NO_FAULT' | sed 's/^/    /'
-                    # objdump robusto: confirma que desensambla y lista mnemónicos AVX/F16C reales
+                      | tail -n 60 | sed 's/^/    /'
+                    # (B) Histograma por librería: ud2 (abort/trap del propio ggml),
+                    # ymm (AVX-256) y CUALQUIER instrucción VEX (v-prefijada = AVX 128/256).
                     if command -v objdump >/dev/null 2>&1; then
-                        _CPU_SO=$(find "$_PYLIBS/llama_cpp/lib" -name 'libggml-cpu.so' 2>/dev/null | head -1)
-                        if [ -n "$_CPU_SO" ]; then
-                            _tot=$(objdump -d "$_CPU_SO" 2>/dev/null | grep -cE '^[[:space:]]+[0-9a-f]+:' || echo 0)
-                            echo "    objdump libggml-cpu.so: ${_tot} instrucciones desensambladas"
-                            objdump -d "$_CPU_SO" 2>/dev/null \
-                              | grep -oE '\b(vcvtph2ps|vcvtps2ph|vfmadd[0-9a-z]*|vbroadcastss|vpbroadcastd|vpand|vpmaddubsw)\b' \
-                              | sort | uniq -c | sed 's/^/      /'
-                        fi
+                        echo "  Histograma por librería (total / ud2 / ymm / VEX):"
+                        for _so in libggml-cpu.so libggml-base.so libggml.so libllama.so; do
+                            _f=$(find "$_PYLIBS/llama_cpp/lib" -name "$_so" 2>/dev/null | head -1)
+                            [ -n "$_f" ] || continue
+                            _d=$(objdump -d "$_f" 2>/dev/null)
+                            _tot=$(printf '%s' "$_d" | grep -cE '^[[:space:]]+[0-9a-f]+:')
+                            _ud=$(printf '%s' "$_d" | grep -cE '[[:space:]]ud2([[:space:]]|$)')
+                            _ym=$(printf '%s' "$_d" | grep -cE '%ymm[0-9]')
+                            _vex=$(printf '%s' "$_d" | grep -cE '[[:space:]]v[a-z][a-z0-9]+[[:space:]]')
+                            echo "    ${_so}: total=${_tot} ud2=${_ud} ymm=${_ym} vex=${_vex}"
+                        done
                     fi
                     echo -e "${DIM}  ────────────────────────────────────────────────────${NC}"
-                    die "SIGILL — pásame el bloque de arriba (FAULT_BYTES y FAULT_LIB). Esos bytes
-  identifican la instrucción exacta y su librería; con eso aplico el fix real."
+                    die "SIGILL — pásame el bloque de arriba COMPLETO. Las líneas 'PROBE_STAGE',
+  el 'system_info' de ggml (AVX/AVX2/F16C...) y el histograma (ud2/ymm/vex) me
+  dicen exactamente DÓNDE y POR QUÉ muere. Con eso aplico el fix real."
                 elif [ "$_sig" -eq 9 ]; then
                     warn "N_CTX=${_try} se quedó SIN MEMORIA (OOM, señal 9). Probando un valor menor..."
                     continue
