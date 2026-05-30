@@ -550,9 +550,43 @@ PYEOF
             elif [ "$_rc" -gt 128 ]; then
                 _sig=$((_rc - 128))
                 if [ "$_sig" -eq 4 ]; then
-                    die "llama_cpp crashea con SIGILL (señal 4): INSTRUCCIÓN ILEGAL.
-  El binario usa instrucciones que esta CPU no ejecuta (AVX/AVX2). Esto NO se
-  arregla bajando N_CTX. Avísame para forzar una ISA aún más baja al compilar."
+                    warn "SIGILL detectado — ejecutando diagnóstico de la instrucción exacta..."
+                    echo -e "${DIM}  ── Diagnóstico SIGILL ──────────────────────────────${NC}"
+                    # (1) .so presentes en llama_cpp (confirmar qué escanear)
+                    echo "  Librerías .so de llama_cpp:"
+                    find "$_PYLIBS/llama_cpp" -name "*.so*" 2>/dev/null | while read -r _f; do
+                        echo "    $(du -h "$_f" 2>/dev/null | cut -f1)  $_f"
+                    done
+                    # (2) Disasm AMPLIO — incluye F16C (vcvtph2ps), que el check previo NO miraba
+                    if command -v objdump >/dev/null 2>&1; then
+                        echo "  Conteo de instrucciones por tipo (por librería):"
+                        for _f in $(find "$_PYLIBS/llama_cpp" -name "*.so*" 2>/dev/null); do
+                            _d=$(objdump -d --no-show-raw-insn "$_f" 2>/dev/null)
+                            for _pat in vcvtph2ps vcvtps2ph vfmadd '%ymm' '%zmm' vbroadcast vpermil vpgather; do
+                                _c=$(printf '%s\n' "$_d" | grep -cE -- "$_pat" 2>/dev/null || echo 0)
+                                _c=$(printf '%s' "$_c" | tr -d '[:space:]')
+                                [ "${_c:-0}" -gt 0 ] 2>/dev/null && echo "    [$(basename "$_f")] ${_pat}: ${_c}"
+                            done
+                        done
+                    fi
+                    # (3) gdb: instrucción EXACTA del fallo + librería culpable
+                    command -v gdb >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq gdb) >/dev/null 2>&1 || true
+                    if command -v gdb >/dev/null 2>&1; then
+                        echo "  Instrucción que falla (gdb):"
+                        PYTHONPATH="$_PYLIBS:${PYTHONPATH:-}" gdb -batch -nx \
+                            -ex 'set pagination off' -ex run \
+                            -ex 'printf "FAULT_INSN "' -ex 'x/i $pc' \
+                            -ex 'info symbol $pc' -ex 'bt' \
+                            --args python3 -c "from llama_cpp import Llama; Llama(model_path='$_GGUF_PATH', n_ctx=256, n_threads=1, verbose=False)" 2>&1 \
+                          | grep -E 'FAULT_INSN|=> 0x|\.so|SIGILL|#[0-9]+ ' | head -n 20 | sed 's/^/    /'
+                    fi
+                    # (4) dmesg (si el container tiene acceso)
+                    dmesg 2>/dev/null | grep -iE 'invalid opcode|trap' | tail -3 | sed 's/^/    dmesg: /' || true
+                    echo -e "${DIM}  ────────────────────────────────────────────────────${NC}"
+                    die "SIGILL — diagnóstico arriba. Pásame ESTE log completo para el fix definitivo.
+  (CPU: avx=sí pero f16c/avx2/fma=no → muy probablemente una instrucción F16C
+   'vcvtph2ps' que ggml usa en su ruta AVX asumiendo que toda CPU con AVX
+   tiene F16C. El conteo de arriba lo confirma.)"
                 elif [ "$_sig" -eq 9 ]; then
                     warn "N_CTX=${_try} se quedó SIN MEMORIA (OOM, señal 9). Probando un valor menor..."
                     continue
