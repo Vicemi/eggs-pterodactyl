@@ -380,19 +380,31 @@ if [ "$M_TYPE" = "gguf" ]; then
     echo -e "${BOLD}[3.5/4] llama-cpp-python (CPU compatible)${NC}"
     sep
     _PYLIBS="/home/container/.pylibs"
-    # v5: -march=x86-64 + -UGGML_* undefs (fix definitivo SIGILL)
-    # Por qué v4 falló: cmake añade -DGGML_AVX2=1 como preprocessor define.
-    # GCC entonces compila funciones __attribute__((target("avx2"))) con AVX2
-    # AUNQUE tenga -mno-avx2 en cmd-line (el attribute lo sobrescribe).
-    # Fix: añadir -UGGML_AVX2 etc. AL FINAL → undefinir esos macros → ggml
-    # no compila las funciones AVX. También -march=x86-64 al final para
-    # asegurar baseline sin AVX incluso si cmake añadió -march=native antes.
-    _LLAMA_FLAG="$_PYLIBS/.llama_noavx_v5_ok"
+    # v6: forzar CMAKE_C_COMPILER al wrapper sanitizante + baseline x86-64-v2.
+    # Por qué v5 falló (confirmado por el pre-flight: SIGILL señal 4): poner
+    # CC/CXX como env NO bastó — cmake/scikit-build-core los ignoró y siguió
+    # usando gcc directo con -mavx2 (o -march=native sobre un hipervisor cuyo
+    # CPUID miente y reporta AVX2 que luego no ejecuta). Fix v6:
+    #   1. Wrapper SANITIZANTE: elimina -mavx*/-mfma/-mf16c/-march=native que
+    #      cmake inyecte y fuerza -march=x86-64-v2 (SSE4.2, garantizado sin AVX).
+    #   2. Forzar el wrapper como compilador vía -DCMAKE_C_COMPILER en cmake
+    #      (no solo CC env) → cmake NO puede ignorarlo.
+    #   3. Diagnóstico real: volcado de flags de CPU + disasm correcto del .so.
+    _LLAMA_FLAG="$_PYLIBS/.llama_noavx_v6_ok"
+
+    # Volcado de las capacidades REALES de la CPU (ayuda a diagnosticar SIGILL)
+    _CPUFLAGS=$(grep -m1 '^flags' /proc/cpuinfo 2>/dev/null | sed 's/^flags[[:space:]]*:[[:space:]]*//')
+    if [ -n "$_CPUFLAGS" ]; then
+        _line=""
+        for _f in sse2 sse4_2 avx avx2 fma f16c avx512f; do
+            if printf '%s' "$_CPUFLAGS" | grep -qw "$_f"; then _line="$_line ${_f}=sí"; else _line="$_line ${_f}=no"; fi
+        done
+        echo -e "  ${DIM}CPU :${NC}${_line}"
+    fi
 
     if [ ! -f "$_LLAMA_FLAG" ]; then
         warn "Compilando llama-cpp-python sin AVX (~30-40 min, 1 job)."
         warn "Esto solo ocurre UNA VEZ — los siguientes inicios son instantáneos."
-        # Limpiar build anterior y recrear directorios limpios
         rm -rf "$_PYLIBS" "/home/container/.pip_tmp" "/home/container/.pip_cache" \
                "/home/container/.compiler_wrappers" 2>/dev/null || true
         mkdir -p "$_PYLIBS"
@@ -400,43 +412,83 @@ if [ "$M_TYPE" = "gguf" ]; then
         _PIP_CACHE="/home/container/.pip_cache"
         _WRAPPERS="/home/container/.compiler_wrappers"
         mkdir -p "$_PIP_TMP" "$_PIP_CACHE" "$_WRAPPERS"
-
-        # TMPDIR → evita "No space left on device" en el overlay del container
         export TMPDIR="$_PIP_TMP"
 
-        # COMPILER WRAPPERS — método definitivo (v5).
-        # El wrapper añade AL FINAL del comando del compilador:
-        #   -march=x86-64   → baseline x86-64, overrides cualquier -march=native
-        #   -mno-avx*       → GCC no emite instrucciones AVX/__AVX__ no definido
-        #   -UGGML_AVX*     → undefinir los macros que cmake habría añadido con
-        #                     -DGGML_AVX2=1 etc. Sin ese macro, ggml NO compila
-        #                     las funciones __attribute__((target("avx2"))) que
-        #                     causan SIGILL al ser llamadas en runtime.
+        # ── Wrappers SANITIZANTES de compilador ───────────────────────────────
+        # Cada invocación de gcc/g++ pasa por aquí: se descartan los flags que
+        # habilitan AVX/FMA/F16C y cualquier -march/-mtune, y se fuerza
+        # -march=x86-64-v2 (SSE4.2 — universal en x86-64, SIN AVX). El binario
+        # resultante NO puede contener instrucciones AVX, sea cual sea lo que
+        # cmake o ggml intenten añadir.
         _REAL_GCC="$(command -v gcc 2>/dev/null || echo /usr/bin/gcc)"
         _REAL_GPP="$(command -v g++ 2>/dev/null || echo /usr/bin/g++)"
-        _NOAVX_FLAGS='-march=x86-64 -mno-avx -mno-avx2 -mno-fma -mno-f16c -mno-avx512f -UGGML_AVX -UGGML_AVX2 -UGGML_FMA -UGGML_F16C -UGGML_AVX512'
-        printf '#!/bin/bash\nexec "%s" "$@" %s\n' "$_REAL_GCC" "$_NOAVX_FLAGS" > "$_WRAPPERS/gcc"
-        printf '#!/bin/bash\nexec "%s" "$@" %s\n' "$_REAL_GPP" "$_NOAVX_FLAGS" > "$_WRAPPERS/g++"
+        export NOVAX_REAL_CC="$_REAL_GCC"
+        export NOVAX_REAL_CXX="$_REAL_GPP"
+        cat > "$_WRAPPERS/gcc" <<'WRAP'
+#!/bin/bash
+args=()
+for a in "$@"; do
+  case "$a" in
+    -mavx*|-mfma*|-mf16c|-march=*|-mtune=*) ;;   # descartar (habilitan AVX/etc.)
+    *) args+=("$a") ;;
+  esac
+done
+exec "${NOVAX_REAL_CC:-/usr/bin/gcc}" "${args[@]}" \
+  -march=x86-64-v2 -mno-avx -mno-avx2 -mno-avx512f -mno-fma -mno-f16c
+WRAP
+        cat > "$_WRAPPERS/g++" <<'WRAP'
+#!/bin/bash
+args=()
+for a in "$@"; do
+  case "$a" in
+    -mavx*|-mfma*|-mf16c|-march=*|-mtune=*) ;;
+    *) args+=("$a") ;;
+  esac
+done
+exec "${NOVAX_REAL_CXX:-/usr/bin/g++}" "${args[@]}" \
+  -march=x86-64-v2 -mno-avx -mno-avx2 -mno-avx512f -mno-fma -mno-f16c
+WRAP
         chmod +x "$_WRAPPERS/gcc" "$_WRAPPERS/g++"
         export CC="$_WRAPPERS/gcc"
         export CXX="$_WRAPPERS/g++"
-
-        # Flags adicionales (redundancia)
-        export CFLAGS="-march=x86-64 -mno-avx -mno-avx2 -mno-fma -mno-f16c"
-        export CXXFLAGS="-march=x86-64 -mno-avx -mno-avx2 -mno-fma -mno-f16c"
-        export CMAKE_ARGS="-DGGML_NATIVE=OFF -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_F16C=OFF -DGGML_FMA=OFF -DGGML_AVX512=OFF"
+        export CFLAGS="-march=x86-64-v2 -mno-avx -mno-avx2 -mno-fma -mno-f16c"
+        export CXXFLAGS="$CFLAGS"
+        # CMAKE_ARGS: forzar el compilador wrapper + desactivar GGML AVX/NATIVE
+        export CMAKE_ARGS="-DCMAKE_C_COMPILER=$_WRAPPERS/gcc -DCMAKE_CXX_COMPILER=$_WRAPPERS/g++ -DGGML_NATIVE=OFF -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_AVX512=OFF -DGGML_FMA=OFF -DGGML_F16C=OFF"
         export CMAKE_BUILD_PARALLEL_LEVEL=1
 
         if pip3 install --break-system-packages \
             --target "$_PYLIBS" \
             --cache-dir "$_PIP_CACHE" \
+            --config-settings "cmake.args=-DCMAKE_C_COMPILER=$_WRAPPERS/gcc" \
+            --config-settings "cmake.args=-DCMAKE_CXX_COMPILER=$_WRAPPERS/g++" \
             --config-settings "cmake.args=-DGGML_NATIVE=OFF" \
             --config-settings "cmake.args=-DGGML_AVX=OFF" \
             --config-settings "cmake.args=-DGGML_AVX2=OFF" \
-            --config-settings "cmake.args=-DGGML_F16C=OFF" \
-            --config-settings "cmake.args=-DGGML_FMA=OFF" \
             --config-settings "cmake.args=-DGGML_AVX512=OFF" \
+            --config-settings "cmake.args=-DGGML_FMA=OFF" \
+            --config-settings "cmake.args=-DGGML_F16C=OFF" \
             "llama-cpp-python" --no-binary llama-cpp-python; then
+
+            # ── Verificación por disasm (patrones AVX correctos) ──────────────
+            _AVXN=0
+            if command -v objdump >/dev/null 2>&1; then
+                while IFS= read -r _so; do
+                    [ -n "$_so" ] || continue
+                    _n=$(objdump -d --no-show-raw-insn "$_so" 2>/dev/null \
+                         | grep -Eco '%(y|z)mm[0-9]+|vfmadd|vbroadcast|vpermil|vmaskmov|vperm2' || true)
+                    _AVXN=$((_AVXN + _n))
+                done <<EOF
+$(find "$_PYLIBS" -name "*.so" 2>/dev/null)
+EOF
+                if [ "$_AVXN" -gt 0 ]; then
+                    warn "DISASM: ${_AVXN} instrucciones AVX/FMA en el binario — los flags NO se aplicaron."
+                    warn "El modelo crasheará con SIGILL. Reporta esto si vuelve a pasar."
+                else
+                    ok "DISASM: binario limpio (0 instrucciones AVX/FMA detectadas)"
+                fi
+            fi
+
             touch "$_LLAMA_FLAG"
             ok "llama-cpp-python compilado y guardado en $_PYLIBS"
             rm -rf "$_PIP_TMP" "$_PIP_CACHE" "$_WRAPPERS"
