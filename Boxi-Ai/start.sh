@@ -550,43 +550,65 @@ PYEOF
             elif [ "$_rc" -gt 128 ]; then
                 _sig=$((_rc - 128))
                 if [ "$_sig" -eq 4 ]; then
-                    warn "SIGILL detectado — ejecutando diagnóstico de la instrucción exacta..."
+                    warn "SIGILL detectado — capturando la instrucción exacta (sin gdb ni root)..."
                     echo -e "${DIM}  ── Diagnóstico SIGILL ──────────────────────────────${NC}"
-                    # (1) .so presentes en llama_cpp (confirmar qué escanear)
                     echo "  Librerías .so de llama_cpp:"
-                    find "$_PYLIBS/llama_cpp" -name "*.so*" 2>/dev/null | while read -r _f; do
+                    find "$_PYLIBS/llama_cpp/lib" -name "*.so*" 2>/dev/null | while read -r _f; do
                         echo "    $(du -h "$_f" 2>/dev/null | cut -f1)  $_f"
                     done
-                    # (2) Disasm AMPLIO — incluye F16C (vcvtph2ps), que el check previo NO miraba
+                    # Catcher Python+ctypes: instala un handler de SIGILL, lee el RIP del
+                    # ucontext, vuelca los bytes del opcode y la librería+offset. Los bytes
+                    # identifican la instrucción SIN ambigüedad (p.ej. c4 e2 79 13 = vcvtph2ps).
+                    cat > /home/container/.sigill_probe.py <<'PYDIAG'
+import ctypes, os, sys
+PATH = sys.argv[1]; NCTX = int(sys.argv[2])
+libc = ctypes.CDLL("libc.so.6", use_errno=True)
+class SA(ctypes.Structure):
+    _fields_ = [("h", ctypes.c_void_p), ("mask", ctypes.c_ulong * 16),
+                ("flags", ctypes.c_int), ("restorer", ctypes.c_void_p)]
+HT = ctypes.CFUNCTYPE(None, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
+def on_ill(sig, info, uc):
+    try:
+        rip = ctypes.cast(uc + 168, ctypes.POINTER(ctypes.c_uint64))[0]
+        raw = (ctypes.c_ubyte * 16).from_address(rip)
+        hexs = " ".join("%02x" % b for b in raw)
+        lib = "?"; off = 0
+        try:
+            for ln in open("/proc/self/maps"):
+                a = ln.split(); r = a[0].split("-")
+                lo = int(r[0], 16); hi = int(r[1], 16)
+                if lo <= rip < hi:
+                    lib = a[5] if len(a) >= 6 else "?"; off = rip - lo; break
+        except Exception:
+            pass
+        os.write(2, ("\nFAULT_RIP=0x%x\nFAULT_BYTES=%s\nFAULT_LIB=%s +0x%x\n" % (rip, hexs, lib, off)).encode())
+    except Exception as e:
+        os.write(2, ("handler-err: %r\n" % (e,)).encode())
+    libc._exit(42)
+_cb = HT(on_ill)
+act = SA(); act.h = ctypes.cast(_cb, ctypes.c_void_p); act.flags = 4  # SA_SIGINFO
+libc.sigaction(4, ctypes.byref(act), None)  # 4 = SIGILL
+from llama_cpp import Llama
+m = Llama(model_path=PATH, n_ctx=NCTX, n_threads=1, n_gpu_layers=0, verbose=False)
+m.create_chat_completion(messages=[{"role": "user", "content": "ping"}], max_tokens=8)
+print("NO_FAULT_REPRO")
+PYDIAG
+                    PYTHONPATH="$_PYLIBS:${PYTHONPATH:-}" python3 /home/container/.sigill_probe.py "$_GGUF_PATH" 256 2>&1 \
+                      | grep -E 'FAULT_RIP|FAULT_BYTES|FAULT_LIB|handler-err|NO_FAULT' | sed 's/^/    /'
+                    # objdump robusto: confirma que desensambla y lista mnemónicos AVX/F16C reales
                     if command -v objdump >/dev/null 2>&1; then
-                        echo "  Conteo de instrucciones por tipo (por librería):"
-                        for _f in $(find "$_PYLIBS/llama_cpp" -name "*.so*" 2>/dev/null); do
-                            _d=$(objdump -d --no-show-raw-insn "$_f" 2>/dev/null)
-                            for _pat in vcvtph2ps vcvtps2ph vfmadd '%ymm' '%zmm' vbroadcast vpermil vpgather; do
-                                _c=$(printf '%s\n' "$_d" | grep -cE -- "$_pat" 2>/dev/null || echo 0)
-                                _c=$(printf '%s' "$_c" | tr -d '[:space:]')
-                                [ "${_c:-0}" -gt 0 ] 2>/dev/null && echo "    [$(basename "$_f")] ${_pat}: ${_c}"
-                            done
-                        done
+                        _CPU_SO=$(find "$_PYLIBS/llama_cpp/lib" -name 'libggml-cpu.so' 2>/dev/null | head -1)
+                        if [ -n "$_CPU_SO" ]; then
+                            _tot=$(objdump -d "$_CPU_SO" 2>/dev/null | grep -cE '^[[:space:]]+[0-9a-f]+:' || echo 0)
+                            echo "    objdump libggml-cpu.so: ${_tot} instrucciones desensambladas"
+                            objdump -d "$_CPU_SO" 2>/dev/null \
+                              | grep -oE '\b(vcvtph2ps|vcvtps2ph|vfmadd[0-9a-z]*|vbroadcastss|vpbroadcastd|vpand|vpmaddubsw)\b' \
+                              | sort | uniq -c | sed 's/^/      /'
+                        fi
                     fi
-                    # (3) gdb: instrucción EXACTA del fallo + librería culpable
-                    command -v gdb >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq gdb) >/dev/null 2>&1 || true
-                    if command -v gdb >/dev/null 2>&1; then
-                        echo "  Instrucción que falla (gdb):"
-                        PYTHONPATH="$_PYLIBS:${PYTHONPATH:-}" gdb -batch -nx \
-                            -ex 'set pagination off' -ex run \
-                            -ex 'printf "FAULT_INSN "' -ex 'x/i $pc' \
-                            -ex 'info symbol $pc' -ex 'bt' \
-                            --args python3 -c "from llama_cpp import Llama; Llama(model_path='$_GGUF_PATH', n_ctx=256, n_threads=1, verbose=False)" 2>&1 \
-                          | grep -E 'FAULT_INSN|=> 0x|\.so|SIGILL|#[0-9]+ ' | head -n 20 | sed 's/^/    /'
-                    fi
-                    # (4) dmesg (si el container tiene acceso)
-                    dmesg 2>/dev/null | grep -iE 'invalid opcode|trap' | tail -3 | sed 's/^/    dmesg: /' || true
                     echo -e "${DIM}  ────────────────────────────────────────────────────${NC}"
-                    die "SIGILL — diagnóstico arriba. Pásame ESTE log completo para el fix definitivo.
-  (CPU: avx=sí pero f16c/avx2/fma=no → muy probablemente una instrucción F16C
-   'vcvtph2ps' que ggml usa en su ruta AVX asumiendo que toda CPU con AVX
-   tiene F16C. El conteo de arriba lo confirma.)"
+                    die "SIGILL — pásame el bloque de arriba (FAULT_BYTES y FAULT_LIB). Esos bytes
+  identifican la instrucción exacta y su librería; con eso aplico el fix real."
                 elif [ "$_sig" -eq 9 ]; then
                     warn "N_CTX=${_try} se quedó SIN MEMORIA (OOM, señal 9). Probando un valor menor..."
                     continue
