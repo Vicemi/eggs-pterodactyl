@@ -569,9 +569,64 @@ o = m.create_chat_completion(messages=[{"role": "user", "content": "ping"}], max
 mark("inference_done")
 print("PROBE_OK:", o["choices"][0]["message"]["content"][:40].replace(chr(10), " "))
 PYDIAG
-                    echo "  Salida COMPLETA de la carga (verbose=True, últimas 60 líneas):"
+                    echo "  Salida COMPLETA de la carga (verbose=True, últimas 40 líneas):"
                     PYTHONPATH="$_PYLIBS:${PYTHONPATH:-}" python3 /home/container/.sigill_probe.py "$_GGUF_PATH" 256 2>&1 \
-                      | tail -n 60 | sed 's/^/    /'
+                      | tail -n 40 | sed 's/^/    /'
+                    # (A2) TRAMPA LD_PRELOAD: handler de SIGILL en C puro (async-signal-safe),
+                    # lee el RIP del ucontext y vuelca los bytes EXACTOS del opcode + librería.
+                    cat > /home/container/.sigill_trap.c <<'CEOF'
+#define _GNU_SOURCE
+#include <signal.h>
+#include <ucontext.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <stdlib.h>
+#include <string.h>
+static void ws(const char*s){ (void)write(2,s,strlen(s)); }
+static void wh(unsigned long v){ char b[19]; b[0]='0'; b[1]='x'; int i;
+  for(i=0;i<16;i++){ int d=(v>>((15-i)*4))&0xf; b[2+i]= d<10?('0'+d):('a'+d-10);} b[18]=0; ws(b); }
+static void on_ill(int s, siginfo_t*si, void*u){
+  ucontext_t*uc=(ucontext_t*)u;
+  unsigned long rip=(unsigned long)uc->uc_mcontext.gregs[REG_RIP];
+  ws("\nFAULT_RIP="); wh(rip); ws("\nFAULT_BYTES=");
+  unsigned char*p=(unsigned char*)rip; int i;
+  for(i=0;i<16;i++){ char h[4]; int a=(p[i]>>4)&0xf,b2=p[i]&0xf;
+    h[0]=a<10?'0'+a:'a'+a-10; h[1]=b2<10?'0'+b2:'a'+b2-10; h[2]=' '; h[3]=0; ws(h);} ws("\n");
+  int fd=open("/proc/self/maps",O_RDONLY);
+  if(fd>=0){ static char buf[131072]; ssize_t n=read(fd,buf,sizeof(buf)-1); close(fd);
+    if(n>0){ buf[n]=0; char*line=buf;
+      while(line&&*line){ char*nl=strchr(line,'\n'); if(nl)*nl=0;
+        char*dash=strchr(line,'-');
+        if(dash){ unsigned long lo=strtoul(line,0,16), hi=strtoul(dash+1,0,16);
+          if(rip>=lo&&rip<hi){ char*sp=strrchr(line,' '); ws("FAULT_LIB="); ws(sp?sp+1:line);
+            ws(" +"); wh(rip-lo); ws("\n"); break; } }
+        line=nl?nl+1:0; } } }
+  _exit(42);
+}
+__attribute__((constructor)) static void setup(void){
+  struct sigaction sa; memset(&sa,0,sizeof sa);
+  sa.sa_sigaction=on_ill; sa.sa_flags=SA_SIGINFO; sigemptyset(&sa.sa_mask);
+  sigaction(SIGILL,&sa,0);
+}
+CEOF
+                    _CCBIN="$(command -v gcc || command -v cc || echo /usr/bin/gcc)"
+                    if "$_CCBIN" -shared -fPIC -O0 /home/container/.sigill_trap.c -o /home/container/.sigill_trap.so 2>/dev/null; then
+                        echo "  Instrucción EXACTA del fallo (trampa LD_PRELOAD en C):"
+                        LD_PRELOAD=/home/container/.sigill_trap.so PYTHONPATH="$_PYLIBS:${PYTHONPATH:-}" \
+                            python3 -c "from llama_cpp import Llama; Llama(model_path='$_GGUF_PATH', n_ctx=256, n_threads=1, n_gpu_layers=0, verbose=True)" \
+                            > /home/container/.trap_out.txt 2>&1 || true
+                        grep -E 'FAULT_RIP|FAULT_BYTES|FAULT_LIB|GGML_|assert|abort|error loading' \
+                            /home/container/.trap_out.txt | tail -n 20 | sed 's/^/    /'
+                        _FB=$(grep -oE 'FAULT_BYTES=.*' /home/container/.trap_out.txt | head -1)
+                        case "$_FB" in
+                          *"0f 0b"*)    echo "    → opcode 0f 0b = UD2 (ggml aborta a propósito / assert interno)" ;;
+                          *"0f 01 d0"*) echo "    → opcode 0f 01 d0 = XGETBV (la VM no deja leer XCR0 → bug del hipervisor)" ;;
+                          FAULT_BYTES=c4*|FAULT_BYTES=c5*) echo "    → prefijo VEX (c4/c5) = instrucción AVX" ;;
+                          FAULT_BYTES=62*) echo "    → prefijo EVEX (62) = instrucción AVX-512" ;;
+                        esac
+                    else
+                        warn "No se pudo compilar la trampa C con $_CCBIN."
+                    fi
                     # (B) Histograma por librería: ud2 (abort/trap del propio ggml),
                     # ymm (AVX-256) y CUALQUIER instrucción VEX (v-prefijada = AVX 128/256).
                     if command -v objdump >/dev/null 2>&1; then
