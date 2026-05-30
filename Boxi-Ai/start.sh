@@ -380,21 +380,16 @@ if [ "$M_TYPE" = "gguf" ]; then
     echo -e "${BOLD}[3.5/4] llama-cpp-python (CPU compatible)${NC}"
     sep
     _PYLIBS="/home/container/.pylibs"
-    # v7: cmake.args en UN solo --config-settings (semicolons) + PATH-intercept.
-    # Causa raíz confirmada (log v6): DISASM mostró 555K instrucciones AVX →
-    # las opciones GGML_AVX=OFF NUNCA llegaron a cmake. Motivos:
-    #   · El pip del VPS es < 23.1 y DESCARTA todos los --config-settings menos
-    #     el ÚLTIMO → solo aplicaba -DGGML_F16C=OFF, dejando GGML_AVX/AVX2 = ON.
-    #   · La versión de scikit-build-core ignora el env CMAKE_ARGS.
-    # Además la CPU tiene AVX pero NO AVX2/FMA/F16C → el binario con AVX2/FMA
-    # da SIGILL. Fix v7:
-    #   1. TODAS las cmake.args en UN único --config-settings, separadas por ';'
-    #      (scikit-build-core lo divide en lista) → ya no se pierden por el pip.
-    #   2. PATH-intercept: wrappers cc/gcc/c++/g++ PRIMEROS en PATH → cmake los
-    #      usa sí o sí. Sanitizan flags AVX y fuerzan -march=x86-64-v2 (solo SSE).
-    #   3. Log de invocaciones del wrapper (prueba de que se usó) + disasm SOLO
-    #      del .so de llama_cpp (excluye numpy, que tiene AVX con dispatch seguro).
-    _LLAMA_FLAG="$_PYLIBS/.llama_noavx_v7_ok"
+    # v8: CAUSA RAÍZ CONFIRMADA con la instrucción exacta (FAULT_BYTES=c4 e2 79 f7
+    # = SHLX, una instrucción BMI2). La CPU es Sandy Bridge: tiene AVX pero NO
+    # BMI2 (BMI2 llegó con Haswell). El wrapper v7 eliminaba -mavx/-mfma/-mf16c
+    # PERO NO -mbmi2 → GCC lo trataba como override que sobrevive a
+    # -march=x86-64-v2 → emitía SHLX → SIGILL. (El histograma decía vex=0 porque
+    # SHLX/MULX/PDEP no empiezan por 'v' aunque sean VEX → no se contaban.)
+    # Fix v8: el wrapper ahora descarta TODOS los flags de features > x86-64-v2
+    # (-mbmi*/-mlzcnt/-mmovbe/-mabm/-mavx*/...) y fuerza -mno-bmi2 etc. Además
+    # -DGGML_BMI2=OFF para que ggml ni compile rutas BMI2.
+    _LLAMA_FLAG="$_PYLIBS/.llama_noavx_v8_ok"
 
     # Volcado de las capacidades REALES de la CPU (ayuda a diagnosticar SIGILL)
     _CPUFLAGS=$(grep -m1 '^flags' /proc/cpuinfo 2>/dev/null | sed 's/^flags[[:space:]]*:[[:space:]]*//')
@@ -419,11 +414,12 @@ if [ "$M_TYPE" = "gguf" ]; then
         export TMPDIR="$_PIP_TMP"
 
         # ── Wrappers SANITIZANTES con PATH-intercept ──────────────────────────
-        # Un único script _novax, symlinkeado como cc/gcc/c++/g++ y puesto
-        # PRIMERO en PATH. Así cmake usa nuestros wrappers haga lo que haga.
-        # Cada wrapper: (1) registra su invocación en un log (prueba de uso),
-        # (2) descarta -mavx*/-mfma/-mf16c/-march/-mtune, (3) fuerza
-        # -march=x86-64-v2 (SSE4.2 — SIN AVX).
+        # Un único script _novax, symlinkeado como cc/gcc/c++/g++ y PRIMERO en
+        # PATH → cmake usa nuestros wrappers haga lo que haga. Cada wrapper:
+        # (1) registra su invocación (prueba de uso), (2) DESCARTA cualquier flag
+        # que habilite features por encima de x86-64-v2 (AVX*, FMA, F16C, BMI*,
+        # LZCNT, MOVBE, ABM, RDRND...), (3) fuerza -march=x86-64-v2 y -mno-* de
+        # todas ellas. Resultado: binario SSE4.2 puro, ejecutable en Sandy Bridge.
         _REAL_GCC="$(command -v gcc 2>/dev/null || echo /usr/bin/gcc)"
         _REAL_GPP="$(command -v g++ 2>/dev/null || echo /usr/bin/g++)"
         export NOVAX_REAL_CC="$_REAL_GCC"
@@ -440,27 +436,28 @@ echo "[$self] $*" >> "${NOVAX_LOG:-/dev/null}" 2>/dev/null
 args=()
 for a in "$@"; do
   case "$a" in
-    -mavx*|-mfma*|-mf16c|-march=*|-mtune=*) ;;   # descartar (habilitan AVX/etc.)
+    -mavx*|-mfma*|-mf16c|-mbmi*|-mlzcnt|-mmovbe|-mabm|-mrdrnd|-mrdseed|-madx|-mfsgsbase|-mxsavec|-mxsaves|-mclflushopt|-mvpclmulqdq|-mgfni|-mvaes|-march=*|-mtune=*) ;;
     *) args+=("$a") ;;
   esac
 done
 exec "$REAL" "${args[@]}" \
-  -march=x86-64-v2 -mno-avx -mno-avx2 -mno-avx512f -mno-fma -mno-f16c
+  -march=x86-64-v2 -mno-avx -mno-avx2 -mno-avx512f -mno-fma -mno-f16c \
+  -mno-bmi -mno-bmi2 -mno-lzcnt -mno-movbe -mno-abm
 WRAP
         chmod +x "$_WRAPPERS/_novax"
         for _n in cc gcc c++ g++; do ln -sf "$_WRAPPERS/_novax" "$_WRAPPERS/$_n"; done
         export PATH="$_WRAPPERS:$PATH"
         export CC="$_WRAPPERS/gcc"
         export CXX="$_WRAPPERS/g++"
-        export CFLAGS="-march=x86-64-v2 -mno-avx -mno-avx2 -mno-fma -mno-f16c"
+        export CFLAGS="-march=x86-64-v2 -mno-avx -mno-avx2 -mno-fma -mno-f16c -mno-bmi -mno-bmi2 -mno-lzcnt -mno-movbe"
         export CXXFLAGS="$CFLAGS"
-        export CMAKE_ARGS="-DCMAKE_C_COMPILER=$_WRAPPERS/gcc -DCMAKE_CXX_COMPILER=$_WRAPPERS/g++ -DGGML_NATIVE=OFF -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_AVX512=OFF -DGGML_FMA=OFF -DGGML_F16C=OFF"
+        export CMAKE_ARGS="-DCMAKE_C_COMPILER=$_WRAPPERS/gcc -DCMAKE_CXX_COMPILER=$_WRAPPERS/g++ -DGGML_NATIVE=OFF -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_AVX512=OFF -DGGML_FMA=OFF -DGGML_F16C=OFF -DGGML_BMI2=OFF"
         export CMAKE_BUILD_PARALLEL_LEVEL=1
 
         # TODAS las cmake.args en UN solo --config-settings, separadas por ';'
-        # (scikit-build-core las divide en lista). Esto evita que el pip antiguo
-        # del VPS descarte todas menos la última.
-        _CMAKE_ALL="-DCMAKE_C_COMPILER=$_WRAPPERS/gcc;-DCMAKE_CXX_COMPILER=$_WRAPPERS/g++;-DGGML_NATIVE=OFF;-DGGML_AVX=OFF;-DGGML_AVX2=OFF;-DGGML_AVX512=OFF;-DGGML_FMA=OFF;-DGGML_F16C=OFF"
+        # (scikit-build-core las divide en lista). Incluye GGML_BMI2=OFF para que
+        # ggml ni compile ni despache rutas BMI2 (SHLX/MULX/PDEP...).
+        _CMAKE_ALL="-DCMAKE_C_COMPILER=$_WRAPPERS/gcc;-DCMAKE_CXX_COMPILER=$_WRAPPERS/g++;-DGGML_NATIVE=OFF;-DGGML_AVX=OFF;-DGGML_AVX2=OFF;-DGGML_AVX512=OFF;-DGGML_FMA=OFF;-DGGML_F16C=OFF;-DGGML_BMI2=OFF"
 
         if pip3 install --break-system-packages \
             --target "$_PYLIBS" \
@@ -476,22 +473,26 @@ WRAP
                 [ "$_NCALLS" -eq 0 ] && warn "El wrapper NO se usó — cmake encontró otro compilador."
             fi
 
-            # ── Disasm SOLO del .so de llama_cpp (excluye numpy) ──────────────
-            _AVXN=0
+            # ── Verificación disasm: AVX (ymm/vfmadd/...) Y BMI2 (shlx/mulx/...) ─
+            # BMI2 fue la causa real del SIGILL en CPUs Sandy Bridge. Sus
+            # mnemónicos NO empiezan por 'v' (shlx/sarx/shrx/mulx/pdep/pext/
+            # rorx/bextr/bzhi) — antes no se contaban. Ahora sí.
+            _AVXN=0; _BMIN=0
             if command -v objdump >/dev/null 2>&1; then
                 while IFS= read -r _so; do
                     [ -n "$_so" ] || continue
-                    _n=$(objdump -d --no-show-raw-insn "$_so" 2>/dev/null \
-                         | grep -Eco '%(y|z)mm[0-9]+|vfmadd|vbroadcast|vpermil|vmaskmov|vperm2' || true)
-                    _AVXN=$((_AVXN + _n))
+                    _d=$(objdump -d "$_so" 2>/dev/null)
+                    _a=$(printf '%s' "$_d" | grep -Eco '%(y|z)mm[0-9]+|vfmadd|vcvtph2ps|vbroadcast|vpermil' || true)
+                    _b=$(printf '%s' "$_d" | grep -Eco '[[:space:]](shlx|sarx|shrx|mulx|pdep|pext|rorx|bextr|bzhi|lzcnt|tzcnt|movbe)[[:space:]]' || true)
+                    _AVXN=$((_AVXN + _a)); _BMIN=$((_BMIN + _b))
                 done <<EOF
-$(find "$_PYLIBS/llama_cpp" -name "*.so*" 2>/dev/null)
+$(find "$_PYLIBS/llama_cpp/lib" -name "*.so*" 2>/dev/null)
 EOF
-                if [ "$_AVXN" -gt 0 ]; then
-                    warn "DISASM (solo llama_cpp): ${_AVXN} instrucciones AVX/FMA — los flags NO se aplicaron."
+                if [ "$_AVXN" -gt 0 ] || [ "$_BMIN" -gt 0 ]; then
+                    warn "DISASM: AVX/FMA=${_AVXN}, BMI2/LZCNT/MOVBE=${_BMIN} — el binario AÚN tiene instrucciones que la CPU no soporta."
                     warn "El modelo crasheará con SIGILL. Reporta este log."
                 else
-                    ok "DISASM (solo llama_cpp): binario limpio, 0 instrucciones AVX/FMA"
+                    ok "DISASM: binario 100% limpio (0 AVX, 0 BMI2/LZCNT/MOVBE)"
                 fi
             fi
 
