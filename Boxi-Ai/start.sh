@@ -380,17 +380,21 @@ if [ "$M_TYPE" = "gguf" ]; then
     echo -e "${BOLD}[3.5/4] llama-cpp-python (CPU compatible)${NC}"
     sep
     _PYLIBS="/home/container/.pylibs"
-    # v6: forzar CMAKE_C_COMPILER al wrapper sanitizante + baseline x86-64-v2.
-    # Por qué v5 falló (confirmado por el pre-flight: SIGILL señal 4): poner
-    # CC/CXX como env NO bastó — cmake/scikit-build-core los ignoró y siguió
-    # usando gcc directo con -mavx2 (o -march=native sobre un hipervisor cuyo
-    # CPUID miente y reporta AVX2 que luego no ejecuta). Fix v6:
-    #   1. Wrapper SANITIZANTE: elimina -mavx*/-mfma/-mf16c/-march=native que
-    #      cmake inyecte y fuerza -march=x86-64-v2 (SSE4.2, garantizado sin AVX).
-    #   2. Forzar el wrapper como compilador vía -DCMAKE_C_COMPILER en cmake
-    #      (no solo CC env) → cmake NO puede ignorarlo.
-    #   3. Diagnóstico real: volcado de flags de CPU + disasm correcto del .so.
-    _LLAMA_FLAG="$_PYLIBS/.llama_noavx_v6_ok"
+    # v7: cmake.args en UN solo --config-settings (semicolons) + PATH-intercept.
+    # Causa raíz confirmada (log v6): DISASM mostró 555K instrucciones AVX →
+    # las opciones GGML_AVX=OFF NUNCA llegaron a cmake. Motivos:
+    #   · El pip del VPS es < 23.1 y DESCARTA todos los --config-settings menos
+    #     el ÚLTIMO → solo aplicaba -DGGML_F16C=OFF, dejando GGML_AVX/AVX2 = ON.
+    #   · La versión de scikit-build-core ignora el env CMAKE_ARGS.
+    # Además la CPU tiene AVX pero NO AVX2/FMA/F16C → el binario con AVX2/FMA
+    # da SIGILL. Fix v7:
+    #   1. TODAS las cmake.args en UN único --config-settings, separadas por ';'
+    #      (scikit-build-core lo divide en lista) → ya no se pierden por el pip.
+    #   2. PATH-intercept: wrappers cc/gcc/c++/g++ PRIMEROS en PATH → cmake los
+    #      usa sí o sí. Sanitizan flags AVX y fuerzan -march=x86-64-v2 (solo SSE).
+    #   3. Log de invocaciones del wrapper (prueba de que se usó) + disasm SOLO
+    #      del .so de llama_cpp (excluye numpy, que tiene AVX con dispatch seguro).
+    _LLAMA_FLAG="$_PYLIBS/.llama_noavx_v7_ok"
 
     # Volcado de las capacidades REALES de la CPU (ayuda a diagnosticar SIGILL)
     _CPUFLAGS=$(grep -m1 '^flags' /proc/cpuinfo 2>/dev/null | sed 's/^flags[[:space:]]*:[[:space:]]*//')
@@ -414,18 +418,25 @@ if [ "$M_TYPE" = "gguf" ]; then
         mkdir -p "$_PIP_TMP" "$_PIP_CACHE" "$_WRAPPERS"
         export TMPDIR="$_PIP_TMP"
 
-        # ── Wrappers SANITIZANTES de compilador ───────────────────────────────
-        # Cada invocación de gcc/g++ pasa por aquí: se descartan los flags que
-        # habilitan AVX/FMA/F16C y cualquier -march/-mtune, y se fuerza
-        # -march=x86-64-v2 (SSE4.2 — universal en x86-64, SIN AVX). El binario
-        # resultante NO puede contener instrucciones AVX, sea cual sea lo que
-        # cmake o ggml intenten añadir.
+        # ── Wrappers SANITIZANTES con PATH-intercept ──────────────────────────
+        # Un único script _novax, symlinkeado como cc/gcc/c++/g++ y puesto
+        # PRIMERO en PATH. Así cmake usa nuestros wrappers haga lo que haga.
+        # Cada wrapper: (1) registra su invocación en un log (prueba de uso),
+        # (2) descarta -mavx*/-mfma/-mf16c/-march/-mtune, (3) fuerza
+        # -march=x86-64-v2 (SSE4.2 — SIN AVX).
         _REAL_GCC="$(command -v gcc 2>/dev/null || echo /usr/bin/gcc)"
         _REAL_GPP="$(command -v g++ 2>/dev/null || echo /usr/bin/g++)"
         export NOVAX_REAL_CC="$_REAL_GCC"
         export NOVAX_REAL_CXX="$_REAL_GPP"
-        cat > "$_WRAPPERS/gcc" <<'WRAP'
+        export NOVAX_LOG="$_WRAPPERS/calls.log"
+        cat > "$_WRAPPERS/_novax" <<'WRAP'
 #!/bin/bash
+self="$(basename "$0")"
+case "$self" in
+  *++) REAL="${NOVAX_REAL_CXX:-/usr/bin/g++}" ;;
+  *)   REAL="${NOVAX_REAL_CC:-/usr/bin/gcc}" ;;
+esac
+echo "[$self] $*" >> "${NOVAX_LOG:-/dev/null}" 2>/dev/null
 args=()
 for a in "$@"; do
   case "$a" in
@@ -433,44 +444,39 @@ for a in "$@"; do
     *) args+=("$a") ;;
   esac
 done
-exec "${NOVAX_REAL_CC:-/usr/bin/gcc}" "${args[@]}" \
+exec "$REAL" "${args[@]}" \
   -march=x86-64-v2 -mno-avx -mno-avx2 -mno-avx512f -mno-fma -mno-f16c
 WRAP
-        cat > "$_WRAPPERS/g++" <<'WRAP'
-#!/bin/bash
-args=()
-for a in "$@"; do
-  case "$a" in
-    -mavx*|-mfma*|-mf16c|-march=*|-mtune=*) ;;
-    *) args+=("$a") ;;
-  esac
-done
-exec "${NOVAX_REAL_CXX:-/usr/bin/g++}" "${args[@]}" \
-  -march=x86-64-v2 -mno-avx -mno-avx2 -mno-avx512f -mno-fma -mno-f16c
-WRAP
-        chmod +x "$_WRAPPERS/gcc" "$_WRAPPERS/g++"
+        chmod +x "$_WRAPPERS/_novax"
+        for _n in cc gcc c++ g++; do ln -sf "$_WRAPPERS/_novax" "$_WRAPPERS/$_n"; done
+        export PATH="$_WRAPPERS:$PATH"
         export CC="$_WRAPPERS/gcc"
         export CXX="$_WRAPPERS/g++"
         export CFLAGS="-march=x86-64-v2 -mno-avx -mno-avx2 -mno-fma -mno-f16c"
         export CXXFLAGS="$CFLAGS"
-        # CMAKE_ARGS: forzar el compilador wrapper + desactivar GGML AVX/NATIVE
         export CMAKE_ARGS="-DCMAKE_C_COMPILER=$_WRAPPERS/gcc -DCMAKE_CXX_COMPILER=$_WRAPPERS/g++ -DGGML_NATIVE=OFF -DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_AVX512=OFF -DGGML_FMA=OFF -DGGML_F16C=OFF"
         export CMAKE_BUILD_PARALLEL_LEVEL=1
+
+        # TODAS las cmake.args en UN solo --config-settings, separadas por ';'
+        # (scikit-build-core las divide en lista). Esto evita que el pip antiguo
+        # del VPS descarte todas menos la última.
+        _CMAKE_ALL="-DCMAKE_C_COMPILER=$_WRAPPERS/gcc;-DCMAKE_CXX_COMPILER=$_WRAPPERS/g++;-DGGML_NATIVE=OFF;-DGGML_AVX=OFF;-DGGML_AVX2=OFF;-DGGML_AVX512=OFF;-DGGML_FMA=OFF;-DGGML_F16C=OFF"
 
         if pip3 install --break-system-packages \
             --target "$_PYLIBS" \
             --cache-dir "$_PIP_CACHE" \
-            --config-settings "cmake.args=-DCMAKE_C_COMPILER=$_WRAPPERS/gcc" \
-            --config-settings "cmake.args=-DCMAKE_CXX_COMPILER=$_WRAPPERS/g++" \
-            --config-settings "cmake.args=-DGGML_NATIVE=OFF" \
-            --config-settings "cmake.args=-DGGML_AVX=OFF" \
-            --config-settings "cmake.args=-DGGML_AVX2=OFF" \
-            --config-settings "cmake.args=-DGGML_AVX512=OFF" \
-            --config-settings "cmake.args=-DGGML_FMA=OFF" \
-            --config-settings "cmake.args=-DGGML_F16C=OFF" \
+            --config-settings "cmake.args=$_CMAKE_ALL" \
             "llama-cpp-python" --no-binary llama-cpp-python; then
 
-            # ── Verificación por disasm (patrones AVX correctos) ──────────────
+            # ── Prueba de que el wrapper se usó ───────────────────────────────
+            if [ -f "$NOVAX_LOG" ]; then
+                _NCALLS=$(wc -l < "$NOVAX_LOG" 2>/dev/null || echo 0)
+                _AVXIN=$(grep -cE -- '-mavx|-mfma|-mf16c|-march=native' "$NOVAX_LOG" 2>/dev/null || echo 0)
+                info "Wrapper de compilador invocado ${_NCALLS} veces; ${_AVXIN} traían flags AVX (eliminados)."
+                [ "$_NCALLS" -eq 0 ] && warn "El wrapper NO se usó — cmake encontró otro compilador."
+            fi
+
+            # ── Disasm SOLO del .so de llama_cpp (excluye numpy) ──────────────
             _AVXN=0
             if command -v objdump >/dev/null 2>&1; then
                 while IFS= read -r _so; do
@@ -479,13 +485,13 @@ WRAP
                          | grep -Eco '%(y|z)mm[0-9]+|vfmadd|vbroadcast|vpermil|vmaskmov|vperm2' || true)
                     _AVXN=$((_AVXN + _n))
                 done <<EOF
-$(find "$_PYLIBS" -name "*.so" 2>/dev/null)
+$(find "$_PYLIBS/llama_cpp" -name "*.so*" 2>/dev/null)
 EOF
                 if [ "$_AVXN" -gt 0 ]; then
-                    warn "DISASM: ${_AVXN} instrucciones AVX/FMA en el binario — los flags NO se aplicaron."
-                    warn "El modelo crasheará con SIGILL. Reporta esto si vuelve a pasar."
+                    warn "DISASM (solo llama_cpp): ${_AVXN} instrucciones AVX/FMA — los flags NO se aplicaron."
+                    warn "El modelo crasheará con SIGILL. Reporta este log."
                 else
-                    ok "DISASM: binario limpio (0 instrucciones AVX/FMA detectadas)"
+                    ok "DISASM (solo llama_cpp): binario limpio, 0 instrucciones AVX/FMA"
                 fi
             fi
 
